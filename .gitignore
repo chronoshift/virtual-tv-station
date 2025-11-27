@@ -1,0 +1,32 @@
+# Binary
+virtual-tv-station
+virtual-tv-station.exe
+
+# Generated files
+genesis.json
+stream/
+*.ts
+*.m3u8
+
+# Go build files
+*.o
+*.a
+*.so
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Test videos (optional - uncomment if needed)
+# *.mp4
+# *.mkv
+# *.avi
