@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -119,15 +118,15 @@ func main() {
 	// Setup HLS Server (Port 8093)
 	muxHLS := http.NewServeMux()
 	muxHLS.HandleFunc("/", handleDashboard)
-	muxHLS.HandleFunc("/api/stats", handleStats)
-	muxHLS.HandleFunc("/stream.m3u8", tailscaleMiddleware(createPlaylistHandler(OutputDirHLS)))
-	muxHLS.HandleFunc("/segment", tailscaleMiddleware(createSegmentHandler(OutputDirHLS, "video/MP2T")))
+	muxHLS.HandleFunc("/api/stats", corsMiddleware(handleStats))
+	muxHLS.HandleFunc("/stream.m3u8", corsMiddleware(tailscaleMiddleware(createPlaylistHandler(OutputDirHLS))))
+	muxHLS.HandleFunc("/segment", corsMiddleware(tailscaleMiddleware(createSegmentHandler(OutputDirHLS, "video/MP2T"))))
 
 	// Setup LLHLS Server (Port 3333)
 	muxLLHLS := http.NewServeMux()
-	muxLLHLS.HandleFunc("/stream.m3u8", tailscaleMiddleware(createPlaylistHandler(OutputDirLLHLS)))
+	muxLLHLS.HandleFunc("/stream.m3u8", corsMiddleware(tailscaleMiddleware(createPlaylistHandler(OutputDirLLHLS))))
 	// LLHLS uses fmp4/m4s
-	muxLLHLS.HandleFunc("/segment", tailscaleMiddleware(createSegmentHandler(OutputDirLLHLS, "video/iso.segment")))
+	muxLLHLS.HandleFunc("/segment", corsMiddleware(tailscaleMiddleware(createSegmentHandler(OutputDirLLHLS, "video/iso.segment"))))
 
 	// Setup graceful shutdown
 	sigChan := make(chan os.Signal, 1)
@@ -439,6 +438,21 @@ func checkTailscale() bool {
 	// Simple check if the output contains valid JSON
 	var result map[string]interface{}
 	return json.Unmarshal(output, &result) == nil
+}
+
+func corsMiddleware(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		handler(w, r)
+	}
 }
 
 func tailscaleMiddleware(handler http.HandlerFunc) http.HandlerFunc {

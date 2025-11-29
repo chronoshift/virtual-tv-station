@@ -17,6 +17,7 @@ The application is a single Go binary that orchestrates:
     *   Produces **two simultaneous outputs** from the single source video.
     *   Output 1: `./stream/hls` (Standard)
     *   Output 2: `./stream/llhls` (Low Latency)
+    *   **Optimization**: Writes segments to a RAM disk (`tmpfs`) at `/app/stream` for high performance.
 4.  **Dockerization**:
     *   `Dockerfile`: Multi-stage build with FFmpeg integration.
     *   `docker-compose.yml`: Orchestration with volume mapping for video injection.
@@ -24,14 +25,17 @@ The application is a single Go binary that orchestrates:
 
 ## Key Files
 *   `main.go`: Contains all server logic, stream management, and handler factories. Reads env vars in `init()`.
+    *   **Middlewares**: `corsMiddleware` (headers) and `tailscaleMiddleware` (security).
 *   `Dockerfile` & `docker-compose.yml`: Container definition and deployment config.
 *   `dashboard.html`: Embedded frontend UI.
-*   `genesis.json`: Stores the initial timestamp to persist synchronization across restarts.
 
 ## Recent Changes
 *   Split architecture to support HLS (8093) and LLHLS (3333) concurrently.
 *   Updated `StreamManager` to calculate two different `startNumber` sequences (one for 4s segments, one for 1s segments).
 *   Refactored HTTP handlers into factory functions to support multiple output directories.
+*   Containerized the application with Docker and added Environment Variable support.
+*   Implemented **RAM Disk (tmpfs)** for segment storage to reduce disk I/O.
+*   Added **CORS middleware** to support external players and verified Tailscale integration.
 *   Containerized the application with Docker and added Environment Variable support.
 
 ## Warm-Up Instructions

@@ -10,6 +10,8 @@ A robust, self-hosted video streaming application in Go that simulates a 24/7 li
 - **Dual Streaming Modes**: 
   - **HLS**: Standard stream on port 8093 (High compatibility)
   - **LLHLS**: Low-Latency stream on port 3333 (Real-time, <2s latency)
+- **Performance**: Docker setup uses RAM disk (`tmpfs`) for zero-latency segment writing
+- **CORS Support**: Built-in CORS middleware for external players
 - **Tailscale Integration**: Secure remote access through Tailscale VPN
 - **Auto-Recovery**: Automatic stream recovery and error handling
 - **Infinite Loop**: Videos play continuously in a seamless loop
