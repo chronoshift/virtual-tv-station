@@ -25,13 +25,16 @@ import (
 var dashboardHTML string
 
 // Configuration
-const (
-	DefaultPort       = 8080
-	VideoPath         = "/path/to/video.mp4" // Change this to your video file
-	OutputDir         = "./stream"
-	SegmentDuration   = 4 // seconds per HLS segment
-	IdleTimeout       = 30 * time.Second
-	StatsUpdatePeriod = 2 * time.Second
+var (
+	DefaultPort          = 8093
+	LLHLSPort            = 3333
+	VideoPath            = "video.mp4"
+	OutputDirHLS         = "./stream/hls"
+	OutputDirLLHLS       = "./stream/llhls"
+	SegmentDurationHLS   = 4
+	SegmentDurationLLHLS = 1
+	IdleTimeout          = 30 * time.Second
+	StatsUpdatePeriod    = 2 * time.Second
 )
 
 // Genesis represents the station's start time
@@ -49,9 +52,10 @@ type StreamManager struct {
 	accessMutex    sync.Mutex
 	viewers        map[string]time.Time
 	viewersMutex   sync.RWMutex
-	isRunning      bool
-	currentSeek    float64
-	startNumber    int64
+	isRunning        bool
+	currentSeek      float64
+	startNumberHLS   int64
+	startNumberLLHLS int64
 }
 
 // Stats represents the current system statistics
@@ -66,10 +70,29 @@ type Stats struct {
 
 var streamManager *StreamManager
 
+func init() {
+	if port := os.Getenv("PORT"); port != "" {
+		if p, err := strconv.Atoi(port); err == nil {
+			DefaultPort = p
+		}
+	}
+	if port := os.Getenv("LLHLS_PORT"); port != "" {
+		if p, err := strconv.Atoi(port); err == nil {
+			LLHLSPort = p
+		}
+	}
+	if path := os.Getenv("VIDEO_PATH"); path != "" {
+		VideoPath = path
+	}
+}
+
 func main() {
-	// Create output directory
-	if err := os.MkdirAll(OutputDir, 0755); err != nil {
-		log.Fatalf("Failed to create output directory: %v", err)
+	// Create output directories
+	if err := os.MkdirAll(OutputDirHLS, 0755); err != nil {
+		log.Fatalf("Failed to create HLS output directory: %v", err)
+	}
+	if err := os.MkdirAll(OutputDirLLHLS, 0755); err != nil {
+		log.Fatalf("Failed to create LLHLS output directory: %v", err)
 	}
 
 	// Initialize stream manager
@@ -93,35 +116,66 @@ func main() {
 	// Start viewer cleanup
 	go streamManager.cleanupViewers()
 
-	// Setup HTTP routes
-	http.HandleFunc("/", handleDashboard)
-	http.HandleFunc("/api/stats", handleStats)
-	http.HandleFunc("/stream.m3u8", tailscaleMiddleware(handlePlaylist))
-	http.HandleFunc("/segment", tailscaleMiddleware(handleSegment))
+	// Setup HLS Server (Port 8093)
+	muxHLS := http.NewServeMux()
+	muxHLS.HandleFunc("/", handleDashboard)
+	muxHLS.HandleFunc("/api/stats", handleStats)
+	muxHLS.HandleFunc("/stream.m3u8", tailscaleMiddleware(createPlaylistHandler(OutputDirHLS)))
+	muxHLS.HandleFunc("/segment", tailscaleMiddleware(createSegmentHandler(OutputDirHLS, "video/MP2T")))
+
+	// Setup LLHLS Server (Port 3333)
+	muxLLHLS := http.NewServeMux()
+	muxLLHLS.HandleFunc("/stream.m3u8", tailscaleMiddleware(createPlaylistHandler(OutputDirLLHLS)))
+	// LLHLS uses fmp4/m4s
+	muxLLHLS.HandleFunc("/segment", tailscaleMiddleware(createSegmentHandler(OutputDirLLHLS, "video/iso.segment")))
 
 	// Setup graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	server := &http.Server{
-		Addr: fmt.Sprintf(":%d", DefaultPort),
+	serverHLS := &http.Server{
+		Addr:    fmt.Sprintf(":%d", DefaultPort),
+		Handler: muxHLS,
+	}
+
+	serverLLHLS := &http.Server{
+		Addr:    fmt.Sprintf(":%d", LLHLSPort),
+		Handler: muxLLHLS,
 	}
 
 	go func() {
-		log.Printf("Starting Virtual TV Station on port %d", DefaultPort)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Server failed: %v", err)
+		log.Printf("Starting HLS Station on port %d", DefaultPort)
+		if err := serverHLS.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("HLS Server failed: %v", err)
+		}
+	}()
+
+	go func() {
+		log.Printf("Starting LLHLS Station on port %d", LLHLSPort)
+		if err := serverLLHLS.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("LLHLS Server failed: %v", err)
 		}
 	}()
 
 	<-sigChan
 	log.Println("Shutting down...")
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	
+
 	streamManager.stopFFmpeg()
-	server.Shutdown(ctx)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		serverHLS.Shutdown(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		serverLLHLS.Shutdown(ctx)
+	}()
+	wg.Wait()
 }
 
 func (sm *StreamManager) loadGenesis() error {
@@ -178,7 +232,7 @@ func (sm *StreamManager) getVideoDuration() error {
 	return nil
 }
 
-func (sm *StreamManager) calculateCurrentPosition() (seekTime float64, startNumber int64) {
+func (sm *StreamManager) calculateCurrentPosition() (seekTime float64, startNumberHLS, startNumberLLHLS int64) {
 	now := time.Now().Unix()
 	elapsed := now - sm.genesis.StartTime
 	
@@ -188,10 +242,11 @@ func (sm *StreamManager) calculateCurrentPosition() (seekTime float64, startNumb
 		seekTime -= sm.videoDuration
 	}
 	
-	// Calculate segment start number (never resets)
-	startNumber = elapsed / int64(SegmentDuration)
+	// Calculate segment start numbers (never reset)
+	startNumberHLS = elapsed / int64(SegmentDurationHLS)
+	startNumberLLHLS = elapsed / int64(SegmentDurationLLHLS)
 	
-	return seekTime, startNumber
+	return seekTime, startNumberHLS, startNumberLLHLS
 }
 
 func (sm *StreamManager) startFFmpeg() error {
@@ -202,35 +257,56 @@ func (sm *StreamManager) startFFmpeg() error {
 		return nil
 	}
 	
-	seekTime, startNumber := sm.calculateCurrentPosition()
+	seekTime, startNumberHLS, startNumberLLHLS := sm.calculateCurrentPosition()
 	sm.currentSeek = seekTime
-	sm.startNumber = startNumber
+	sm.startNumberHLS = startNumberHLS
+	sm.startNumberLLHLS = startNumberLLHLS
 	
-	log.Printf("Starting FFmpeg at seek: %.2f, segment: %d", seekTime, startNumber)
+	log.Printf("Starting FFmpeg at seek: %.2f, HLS segment: %d, LLHLS segment: %d", seekTime, startNumberHLS, startNumberLLHLS)
 	
-	// Clean up old segments
-	files, _ := filepath.Glob(filepath.Join(OutputDir, "*.ts"))
-	for _, f := range files {
+	// Clean up old segments in both directories
+	filesHLS, _ := filepath.Glob(filepath.Join(OutputDirHLS, "*.ts"))
+	for _, f := range filesHLS {
+		os.Remove(f)
+	}
+	filesLLHLS, _ := filepath.Glob(filepath.Join(OutputDirLLHLS, "*.m4s")) // LLHLS uses m4s/mp4 usually, but let's stick to basic naming if possible or check args
+	for _, f := range filesLLHLS {
+		os.Remove(f)
+	}
+	// Also clean .mp4 init segments for fmp4 if present
+	filesMp4, _ := filepath.Glob(filepath.Join(OutputDirLLHLS, "*.mp4"))
+	for _, f := range filesMp4 {
 		os.Remove(f)
 	}
 	
-	// Build FFmpeg command
+	// Build FFmpeg command with dual outputs
 	args := []string{
 		"-ss", fmt.Sprintf("%.2f", seekTime),
 		"-i", VideoPath,
-		"-c:v", "libx264", // Use hardware acceleration if available: "h264_nvenc", "h264_qsv", etc.
+		"-c:v", "libx264",
 		"-preset", "fast",
 		"-crf", "23",
 		"-c:a", "aac",
 		"-b:a", "128k",
+		
+		// Output 1: HLS (Standard)
 		"-f", "hls",
-		"-hls_time", fmt.Sprintf("%d", SegmentDuration),
+		"-hls_time", fmt.Sprintf("%d", SegmentDurationHLS),
 		"-hls_list_size", "5",
 		"-hls_flags", "delete_segments",
-		"-start_number", fmt.Sprintf("%d", startNumber),
-		"-hls_segment_filename", filepath.Join(OutputDir, "segment%d.ts"),
-		"-stream_loop", "-1",
-		filepath.Join(OutputDir, "stream.m3u8"),
+		"-start_number", fmt.Sprintf("%d", startNumberHLS),
+		"-hls_segment_filename", filepath.Join(OutputDirHLS, "segment%d.ts"),
+		filepath.Join(OutputDirHLS, "stream.m3u8"),
+
+		// Output 2: LLHLS (Low Latency - approximated with shorter segments and fmp4)
+		"-f", "hls",
+		"-hls_time", fmt.Sprintf("%d", SegmentDurationLLHLS),
+		"-hls_list_size", "10", // Keep more segments for LLHLS safety
+		"-hls_flags", "delete_segments",
+		"-hls_segment_type", "fmp4", // Fragmented MP4 for LLHLS
+		"-start_number", fmt.Sprintf("%d", startNumberLLHLS),
+		"-hls_segment_filename", filepath.Join(OutputDirLLHLS, "segment%d.m4s"),
+		filepath.Join(OutputDirLLHLS, "stream.m3u8"),
 	}
 	
 	sm.ffmpegCmd = exec.Command("ffmpeg", args...)
@@ -244,12 +320,12 @@ func (sm *StreamManager) startFFmpeg() error {
 	sm.isRunning = true
 	sm.updateLastAccess()
 	
-	// Wait for playlist to be generated
-	for i := 0; i < 10; i++ {
-		if _, err := os.Stat(filepath.Join(OutputDir, "stream.m3u8")); err == nil {
+	// Wait for playlist to be generated (check HLS as primary)
+	for i := 0; i < 20; i++ {
+		if _, err := os.Stat(filepath.Join(OutputDirHLS, "stream.m3u8")); err == nil {
 			break
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(250 * time.Millisecond)
 	}
 	
 	return nil
@@ -338,7 +414,7 @@ func (sm *StreamManager) cleanupViewers() {
 }
 
 func (sm *StreamManager) getCurrentPlayingTime() string {
-	seekTime, _ := sm.calculateCurrentPosition()
+	seekTime, _, _ := sm.calculateCurrentPosition()
 	hours := int(seekTime) / 3600
 	minutes := (int(seekTime) % 3600) / 60
 	seconds := int(seekTime) % 60
@@ -409,67 +485,71 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(stats)
 }
 
-func handlePlaylist(w http.ResponseWriter, r *http.Request) {
-	// Track viewer
-	ip := r.RemoteAddr
-	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-		ip = forwarded
-	}
-	streamManager.trackViewer(ip)
-	
-	// Start FFmpeg if not running
-	if !streamManager.isRunning {
-		if err := streamManager.startFFmpeg(); err != nil {
-			http.Error(w, "Failed to start stream", http.StatusInternalServerError)
-			return
+func createPlaylistHandler(outputDir string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Track viewer
+		ip := r.RemoteAddr
+		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+			ip = forwarded
 		}
-	}
-	
-	streamManager.updateLastAccess()
-	
-	// Serve the playlist
-	playlistPath := filepath.Join(OutputDir, "stream.m3u8")
-	
-	// Wait for playlist to exist
-	for i := 0; i < 20; i++ {
-		if _, err := os.Stat(playlistPath); err == nil {
-			break
+		streamManager.trackViewer(ip)
+
+		// Start FFmpeg if not running
+		if !streamManager.isRunning {
+			if err := streamManager.startFFmpeg(); err != nil {
+				http.Error(w, "Failed to start stream", http.StatusInternalServerError)
+				return
+			}
 		}
-		time.Sleep(100 * time.Millisecond)
+
+		streamManager.updateLastAccess()
+
+		// Serve the playlist
+		playlistPath := filepath.Join(outputDir, "stream.m3u8")
+
+		// Wait for playlist to exist
+		for i := 0; i < 20; i++ {
+			if _, err := os.Stat(playlistPath); err == nil {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		w.Header().Set("Cache-Control", "no-cache")
+		http.ServeFile(w, r, playlistPath)
 	}
-	
-	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-	w.Header().Set("Cache-Control", "no-cache")
-	http.ServeFile(w, r, playlistPath)
 }
 
-func handleSegment(w http.ResponseWriter, r *http.Request) {
-	// Track viewer
-	ip := r.RemoteAddr
-	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-		ip = forwarded
-	}
-	streamManager.trackViewer(ip)
-	streamManager.updateLastAccess()
-	
-	// Get segment name from query
-	segmentName := r.URL.Query().Get("name")
-	if segmentName == "" {
-		http.Error(w, "Missing segment name", http.StatusBadRequest)
-		return
-	}
-	
-	segmentPath := filepath.Join(OutputDir, segmentName)
-	
-	// Wait for segment to exist (max 5 seconds)
-	for i := 0; i < 50; i++ {
-		if _, err := os.Stat(segmentPath); err == nil {
-			break
+func createSegmentHandler(outputDir string, contentType string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Track viewer
+		ip := r.RemoteAddr
+		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+			ip = forwarded
 		}
-		time.Sleep(100 * time.Millisecond)
+		streamManager.trackViewer(ip)
+		streamManager.updateLastAccess()
+
+		// Get segment name from query
+		segmentName := r.URL.Query().Get("name")
+		if segmentName == "" {
+			http.Error(w, "Missing segment name", http.StatusBadRequest)
+			return
+		}
+
+		segmentPath := filepath.Join(outputDir, segmentName)
+
+		// Wait for segment to exist (max 5 seconds)
+		for i := 0; i < 50; i++ {
+			if _, err := os.Stat(segmentPath); err == nil {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Cache-Control", "no-cache")
+		http.ServeFile(w, r, segmentPath)
 	}
-	
-	w.Header().Set("Content-Type", "video/MP2T")
-	w.Header().Set("Cache-Control", "no-cache")
-	http.ServeFile(w, r, segmentPath)
 }

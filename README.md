@@ -7,7 +7,9 @@ A robust, self-hosted video streaming application in Go that simulates a 24/7 li
 - **Virtual Live Broadcasting**: All viewers see the same moment in the video, regardless of when they join
 - **Resource-Efficient**: FFmpeg only runs when viewers are actively watching
 - **Web Dashboard**: Beautiful dark-mode UI with real-time statistics
-- **HLS Streaming**: Industry-standard HTTP Live Streaming protocol
+- **Dual Streaming Modes**: 
+  - **HLS**: Standard stream on port 8093 (High compatibility)
+  - **LLHLS**: Low-Latency stream on port 3333 (Real-time, <2s latency)
 - **Tailscale Integration**: Secure remote access through Tailscale VPN
 - **Auto-Recovery**: Automatic stream recovery and error handling
 - **Infinite Loop**: Videos play continuously in a seamless loop
@@ -61,15 +63,23 @@ go build -o virtual-tv-station main.go
 
 ## Configuration
 
-Edit `main.go` before building to set your video file path:
+The application is configured via Environment Variables. When running with Docker, these can be set in `docker-compose.yml` or passed via `docker run -e`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | 8093 | Port for Dashboard + HLS Stream |
+| `LLHLS_PORT` | 3333 | Port for LLHLS Stream |
+| `VIDEO_PATH` | `video.mp4` | Path to the source video file inside the container/system |
+
+### Source Code Constants
+For development, you can also modify the defaults in `main.go` (vars section):
 
 ```go
-const (
-    DefaultPort = 8080
-    VideoPath = "/path/to/your/video.mp4"  // Change this!
-    OutputDir = "./stream"
-    SegmentDuration = 4
-    IdleTimeout = 30 * time.Second
+var (
+    DefaultPort = 8093
+    LLHLSPort   = 3333
+    VideoPath   = "video.mp4"
+    // ...
 )
 ```
 
@@ -118,36 +128,46 @@ sudo systemctl enable virtual-tv-station
 sudo systemctl start virtual-tv-station
 ```
 
-### With Docker (Optional)
+### With Docker (Recommended)
 
-Create `Dockerfile`:
+1. Place your video file in the project directory (e.g., `video.mp4`).
+2. Run with Docker Compose:
 
-```dockerfile
-FROM golang:1.20-alpine AS builder
-WORKDIR /app
-COPY . .
-RUN go build -o virtual-tv-station main.go
-
-FROM alpine:latest
-RUN apk add --no-cache ffmpeg
-WORKDIR /app
-COPY --from=builder /app/virtual-tv-station .
-COPY dashboard.html .
-EXPOSE 8080
-CMD ["./virtual-tv-station"]
+```bash
+docker-compose up --build -d
 ```
 
-Build and run:
+The dashboard will be available at `http://localhost:8093`.
+
+To change the video file, update the `volumes` section in `docker-compose.yml`:
+
+```yaml
+volumes:
+  - /absolute/path/to/my-movie.mp4:/video.mp4
+```
+
+### With Docker CLI
+
 ```bash
 docker build -t virtual-tv-station .
-docker run -d -p 8080:8080 -v /path/to/video.mp4:/video.mp4 virtual-tv-station
+docker run -d \
+  -p 8093:8093 \
+  -p 3333:3333 \
+  -v $(pwd)/video.mp4:/video.mp4 \
+  -e VIDEO_PATH=/video.mp4 \
+  virtual-tv-station
 ```
 
 ## Usage
 
-1. **Access Dashboard**: Open `http://localhost:8080` in your browser
-2. **View Stream**: The embedded player will automatically connect
-3. **Direct Stream URL**: Access HLS playlist at `http://localhost:8080/stream.m3u8`
+1. **Access Dashboard**: Open `http://localhost:8093` in your browser
+2. **Standard Stream (HLS)**: 
+   - Playlist: `http://localhost:8093/stream.m3u8`
+   - Best for: Compatibility, stability, mobile devices
+3. **Low-Latency Stream (LLHLS)**:
+   - Playlist: `http://localhost:3333/stream.m3u8`
+   - Best for: Real-time sync, minimum latency
+   - Note: Requires player support for LLHLS/fmp4
 
 ### Client Applications
 
@@ -176,10 +196,15 @@ The stream is compatible with any HLS player:
 
 ## API Endpoints
 
+### Port 8093 (Main/HLS)
 - `GET /` - Web dashboard
 - `GET /api/stats` - JSON statistics
-- `GET /stream.m3u8` - HLS playlist (Tailscale protected)
-- `GET /segment?name={name}` - Video segments (Tailscale protected)
+- `GET /stream.m3u8` - HLS playlist
+- `GET /segment?name={name}` - HLS TS segments
+
+### Port 3333 (LLHLS)
+- `GET /stream.m3u8` - LLHLS playlist
+- `GET /segment?name={name}` - LLHLS fmp4/m4s segments
 
 ### Stats API Response
 

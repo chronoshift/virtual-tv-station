@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  tv-station:
+    build: .
+    image: virtual-tv-station:latest
+    ports:
+      - "8093:8093" # HLS + Dashboard
+      - "3333:3333" # LLHLS
+    volumes:
+      # Map the video file from host to container
+      # usage: replace ./video.mp4 with your local video path
+      - ./video.mp4:/video.mp4
+      
+      # Optional: Persist the genesis time so stream sync survives restarts
+      - ./genesis.json:/app/genesis.json
+    environment:
+      - VIDEO_PATH=/video.mp4
+      - PORT=8093
+      - LLHLS_PORT=3333
+    restart: unless-stopped
