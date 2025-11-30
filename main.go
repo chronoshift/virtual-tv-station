@@ -277,6 +277,7 @@ func (sm *StreamManager) startFFmpeg() error {
 	
 	// Build FFmpeg command with dual outputs
 	args := []string{
+		"-re",
 		"-ss", fmt.Sprintf("%.2f", seekTime),
 		"-i", VideoPath,
 		"-c:v", "libx264",
