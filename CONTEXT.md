@@ -1,43 +1,42 @@
-# Project Context: Virtual TV Station
+# Virtual TV Station Project Context
 
 ## Overview
-This application simulates a 24/7 live TV station using a looped video file. It ensures all viewers see the exact same moment of the video (synchronized playback) using a "Genesis Time" calculation.
+This project simulates a live TV station by looping a video file indefinitely. It uses FFmpeg for transcoding and Go for orchestration and serving.
 
 ## Architecture
-The application is a single Go binary that orchestrates:
-1.  **StreamManager**: The core logic engine.
-    *   Calculates seek position based on `(Now - Genesis)`.
-    *   Manages the FFmpeg process (start/stop/idle).
-    *   Tracks viewers and handles cleanup.
-2.  **Dual HTTP Servers**:
-    *   **HLS Server (Port 8093)**: Serves the Web Dashboard, Stats API, and Standard HLS (MPEG-TS, 4s segments).
-    *   **LLHLS Server (Port 3333)**: Serves Low-Latency HLS (fmp4, 1s segments).
-3.  **FFmpeg Engine**:
-    *   Runs as a child process.
-    *   Produces **two simultaneous outputs** from the single source video.
-    *   Output 1: `./stream/hls` (Standard)
-    *   Output 2: `./stream/llhls` (Low Latency)
-    *   **Optimization**: Writes segments to a RAM disk (`tmpfs`) at `/app/stream` for high performance.
-4.  **Dockerization**:
-    *   `Dockerfile`: Multi-stage build with FFmpeg integration.
-    *   `docker-compose.yml`: Orchestration with volume mapping for video injection.
-    *   **Configuration**: Uses environment variables (`VIDEO_PATH`, `PORT`) injected via `init()`.
+*   **Language**: Go (Golang)
+*   **Transcoder**: FFmpeg
+    *   **Encoder**: NVIDIA  (GPU Accelerated)
+    *   **Audio**:  (Passthrough)
+    *   **Tuning**:  (Low Latency)
+*   **Protocol**: HLS (HTTP Live Streaming)
+    *   **Standard**: MPEG-TS segments (4s duration).
+    *   **Low-Latency**: fMP4 segments (1s duration).
+*   **Storage**:  (RAM Disk) at  for segment storage to prevent SSD wear.
 
-## Key Files
-*   `main.go`: Contains all server logic, stream management, and handler factories. Reads env vars in `init()`.
-    *   **Middlewares**: `corsMiddleware` (headers) and `tailscaleMiddleware` (security).
-*   `Dockerfile` & `docker-compose.yml`: Container definition and deployment config.
-*   `dashboard.html`: Embedded frontend UI.
+## Key Components
+1.  **StreamManager ()**:
+    *   Manages the FFmpeg lifecycle (start/stop/watchdog).
+    *   Calculates playback position based on .
+    *   Tracks viewers by IP.
+    *   Monitors CPU usage via .
+    *   Handles API requests for stats and control (Pause/Seek).
+2.  **Dashboard ()**:
+    *   Embedded HTML5/JS frontend.
+    *   Uses  for playback.
+    *   Displays real-time stats, client lists, and overlay progress.
+    *   Provides controls to Pause, Resume, and Seek the broadcast globally.
+3.  **Infrastructure**:
+    *   **Docker**: Multi-stage build ( -> ).
+    *   **Docker Compose**: Handles GPU reservation and volume mapping.
 
 ## Recent Changes
-*   Split architecture to support HLS (8093) and LLHLS (3333) concurrently.
-*   Updated `StreamManager` to calculate two different `startNumber` sequences (one for 4s segments, one for 1s segments).
-*   Refactored HTTP handlers into factory functions to support multiple output directories.
-*   Containerized the application with Docker and added Environment Variable support.
-*   Implemented **RAM Disk (tmpfs)** for segment storage to reduce disk I/O.
-*   Added **CORS middleware** to support external players and verified Tailscale integration.
-*   Containerized the application with Docker and added Environment Variable support.
+*   **GPU Migration**: Switched to  base image and  for ~1% CPU usage.
+*   **Interactive Controls**: Added API endpoints and UI for pausing and seeking the stream.
+*   **Monitoring**: Added detailed client IP lists and real-time CPU usage tracking.
+*   **Overlay**: Implemented a frontend-based progress percentage overlay (replacing failed backend burn-in attempts).
+*   **Reliability**: Fixed server deadlocks and zombie processes.
 
-## Warm-Up Instructions
-To provide full context to the agent, ask it to:
-"Read the README.md and CONTEXT.md files to understand the current architecture and dual-stream setup."
+## Environment
+*   Runs on Linux with NVIDIA drivers installed.
+*   Depends on .

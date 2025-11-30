@@ -1,272 +1,102 @@
-# Virtual TV Station 📺
+# Virtual TV Station
 
-A robust, self-hosted video streaming application in Go that simulates a 24/7 live broadcast. Stream any video file as if it were a live TV channel with perfect synchronization across all viewers.
+A Go-based "Virtual TV Station" that streams a video file in an infinite loop, simulating a live broadcast. It supports synchronized playback for all viewers, dual streams (Standard HLS and Low-Latency HLS), and now features **GPU acceleration** and **interactive dashboard controls**.
 
 ## Features
 
-- **Virtual Live Broadcasting**: All viewers see the same moment in the video, regardless of when they join
-- **Resource-Efficient**: FFmpeg only runs when viewers are actively watching
-- **Web Dashboard**: Beautiful dark-mode UI with real-time statistics
-- **Dual Streaming Modes**: 
-  - **HLS**: Standard stream on port 8093 (High compatibility)
-  - **LLHLS**: Low-Latency stream on port 3333 (Real-time, <2s latency)
-- **Performance**: Docker setup uses RAM disk (`tmpfs`) for zero-latency segment writing
-- **CORS Support**: Built-in CORS middleware for external players
-- **Tailscale Integration**: Secure remote access through Tailscale VPN
-- **Auto-Recovery**: Automatic stream recovery and error handling
-- **Infinite Loop**: Videos play continuously in a seamless loop
+*   **Virtual Live Broadcast**: All viewers see the same moment in the video (synchronized to a persisted "genesis" time).
+*   **Dual Streams**:
+    *   **Standard HLS** (Port 8093): High compatibility, reliable.
+    *   **Low-Latency HLS (LL-HLS)** (Port 3333): Latency < 2 seconds.
+*   **GPU Acceleration**: Uses **NVIDIA NVENC** () for highly efficient transcoding (~1% CPU usage on modern systems).
+*   **Dashboard Controls**:
+    *   **Pause/Resume**: Globally pause the broadcast for all viewers.
+    *   **Seek**: Move the broadcast to any point in the video loop.
+*   **Real-time Monitoring**:
+    *   **Client List**: See active viewers by IP address for each stream.
+    *   **CPU Usage**: Monitor container resource usage in real-time.
+    *   **Progress Overlay**: Visual playback percentage on the dashboard streams.
+*   **Optimized**:
+    *   **Audio Passthrough**: Copies audio track to save CPU.
+    *   **RAM Disk**: Writes segments to memory () to prevent SSD wear.
+    *   **Zero Latency Tuning**: Optimized encoder settings.
 
 ## Prerequisites
 
-- **Go 1.20+**: For building the application
-- **FFmpeg**: Must be installed and available in PATH
-- **Tailscale** (optional): For secure remote access
-- **Linux/macOS**: Recommended for production use (Windows supported for development)
+*   **Docker & Docker Compose** (with **NVIDIA Container Toolkit** installed).
+*   **NVIDIA GPU** (Pascal or newer recommended).
+*   **Video File**: A standard MP4/MKV video file.
 
-## Installation
+## Quick Start
 
-### Install FFmpeg
+1.  **Prepare Environment**:
+    Ensure you have the NVIDIA Container Toolkit set up:
+    ```bash
+    sudo apt-get install -y nvidia-container-toolkit
+    sudo nvidia-ctk runtime configure --runtime=docker
+    sudo systemctl restart docker
+    ```
 
-Ubuntu/Debian:
-```bash
-sudo apt update
-sudo apt install ffmpeg
-```
+2.  **Run with Docker Compose**:
+    Update `docker-compose.yml` to point to your video file:
+    ```yaml
+    volumes:
+      - /path/to/your/video.mp4:/video.mp4
+    ```
+    Start the station:
+    ```bash
+    docker-compose up --build -d
+    ```
 
-macOS:
-```bash
-brew install ffmpeg
-```
-
-Windows:
-Download from [ffmpeg.org](https://ffmpeg.org/download.html) and add to PATH
-
-### Install Tailscale (Optional)
-
-Ubuntu/Debian:
-```bash
-curl -fsSL https://tailscale.com/install.sh | sh
-```
-
-macOS:
-```bash
-brew install tailscale
-```
-
-## Building
-
-```bash
-# Clone or download the project files
-cd virtual-tv-station
-
-# Build the application
-go build -o virtual-tv-station main.go
-```
+3.  **Access**:
+    *   **Dashboard**: [http://localhost:8093](http://localhost:8093)
+    *   **HLS Playlist**: `http://localhost:8093/hls/stream.m3u8`
+    *   **LL-HLS Playlist**: `http://localhost:3333/app/stream/llhls.m3u8`
 
 ## Configuration
 
-The application is configured via Environment Variables. When running with Docker, these can be set in `docker-compose.yml` or passed via `docker run -e`.
+Configured via environment variables in `docker-compose.yml`:
 
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `PORT` | 8093 | Port for Dashboard + HLS Stream |
-| `LLHLS_PORT` | 3333 | Port for LLHLS Stream |
-| `VIDEO_PATH` | `video.mp4` | Path to the source video file inside the container/system |
-
-### Source Code Constants
-For development, you can also modify the defaults in `main.go` (vars section):
-
-```go
-var (
-    DefaultPort = 8093
-    LLHLSPort   = 3333
-    VideoPath   = "video.mp4"
-    // ...
-)
-```
-
-### Hardware Acceleration (Optional)
-
-For better performance with large files, enable hardware encoding by modifying line 221 in `main.go`:
-
-- NVIDIA: Change `"libx264"` to `"h264_nvenc"`
-- Intel QuickSync: Change `"libx264"` to `"h264_qsv"` 
-- AMD: Change `"libx264"` to `"h264_amf"`
-
-## Running
-
-### Basic Usage
-
-```bash
-# Run the compiled binary
-./virtual-tv-station
-```
-
-### As a System Service (Linux)
-
-Create `/etc/systemd/system/virtual-tv-station.service`:
-
-```ini
-[Unit]
-Description=Virtual TV Station
-After=network.target
-
-[Service]
-Type=simple
-User=yourusername
-WorkingDirectory=/path/to/virtual-tv-station
-ExecStart=/path/to/virtual-tv-station/virtual-tv-station
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable and start:
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable virtual-tv-station
-sudo systemctl start virtual-tv-station
-```
-
-### With Docker (Recommended)
-
-1. Place your video file in the project directory (e.g., `video.mp4`).
-2. Run with Docker Compose:
-
-```bash
-docker-compose up --build -d
-```
-
-The dashboard will be available at `http://localhost:8093`.
-
-To change the video file, update the `volumes` section in `docker-compose.yml`:
-
-```yaml
-volumes:
-  - /absolute/path/to/my-movie.mp4:/video.mp4
-```
-
-### With Docker CLI
-
-```bash
-docker build -t virtual-tv-station .
-docker run -d \
-  -p 8093:8093 \
-  -p 3333:3333 \
-  -v $(pwd)/video.mp4:/video.mp4 \
-  -e VIDEO_PATH=/video.mp4 \
-  virtual-tv-station
-```
-
-## Usage
-
-1. **Access Dashboard**: Open `http://localhost:8093` in your browser
-2. **Standard Stream (HLS)**: 
-   - Playlist: `http://localhost:8093/hls/stream.m3u8`
-   - Best for: Compatibility, stability, mobile devices
-3. **Low-Latency Stream (LLHLS)**:
-   - Playlist: `http://localhost:3333/app/stream/llhls.m3u8`
-   - Best for: Real-time sync, minimum latency
-   - Note: Requires player support for LLHLS/fmp4
-
-### Client Applications
-
-The stream is compatible with any HLS player:
-
-- **VLC**: File → Open Network Stream → `http://yourserver:8080/stream.m3u8`
-- **MPV**: `mpv http://yourserver:8080/stream.m3u8`
-- **Web**: Use HLS.js (included in dashboard)
-- **Mobile**: Most mobile browsers support HLS natively
-
-## How It Works
-
-### Virtual Live Logic
-
-1. On first run, creates `genesis.json` with the station's "birth" timestamp
-2. Calculates current playback position: `(current_time - genesis_time) % video_duration`
-3. Ensures segment numbering never resets: `(current_time - genesis_time) / segment_duration`
-4. All viewers receive the same segments at the same time
-
-### Resource Management
-
-- FFmpeg starts only when the first viewer requests the stream
-- Automatic shutdown after 30 seconds of no activity
-- Viewer tracking with 60-second timeout
-- Efficient segment cleanup to prevent disk bloat
+| :--- | :--- | :--- |
+| `PORT` | 8093 | Port for HLS and Dashboard |
+| `LLHLS_PORT` | 3333 | Port for LL-HLS Stream |
+| `VIDEO_PATH` | /video.mp4 | Path to source video in container |
 
 ## API Endpoints
 
-### Port 8093 (Main/HLS)
-- `GET /` - Web dashboard
-- `GET /api/stats` - JSON statistics
-- `GET /stream.m3u8` - HLS playlist
-- `GET /segment?name={name}` - HLS TS segments
+The dashboard communicates with the backend via a simple JSON API:
 
-### Port 3333 (LLHLS)
-- `GET /stream.m3u8` - LLHLS playlist
-- `GET /segment?name={name}` - LLHLS fmp4/m4s segments
-
-### Stats API Response
-
+### GET `/api/stats`
+Returns current status, viewer counts, and playback progress.
 ```json
 {
-  "status": "Online",
-  "viewer_count": 3,
-  "current_playing": "01:45:20",
-  "tailscale_up": true,
-  "cpu_usage": 0.0,
-  "is_running": true
+  "status": "Broadcasting",
+  "viewer_count": 5,
+  "viewers_hls": ["192.168.1.5"],
+  "viewers_llhls": ["192.168.1.6"],
+  "current_playing": "01:23:45",
+  "is_running": true,
+  "is_paused": false,
+  "cpu_usage": "1.2%",
+  "progress": 45.5
 }
 ```
 
+### POST `/api/control`
+Control the broadcast state.
+*   **Pause**: `?action=pause`
+*   **Resume**: `?action=resume`
+*   **Seek**: `?action=seek&position=123.45` (seconds)
+
 ## Troubleshooting
 
-### Stream Not Starting
-- Check FFmpeg is installed: `ffmpeg -version`
-- Verify video file path is correct
-- Check file permissions
-- Review logs for FFmpeg errors
+*   **"File not found"**: Ensure FFmpeg has started (refresh the dashboard or request the playlist).
+*   **GPU Errors**: Check `nvidia-smi` on the host. Ensure  is set in docker-compose.
+*   **High Latency**: Ensure your player supports LL-HLS (most modern browsers do). The dashboard player uses `hls.js` with low-latency mode enabled.
 
-### Tailscale Issues
-- Ensure Tailscale daemon is running: `tailscale status`
-- Start if needed: `sudo systemctl start tailscaled`
-- To disable Tailscale check, comment out the middleware in `main.go`
+## Architecture
 
-### Performance Issues
-- Enable hardware acceleration (see Configuration)
-- Reduce video quality by adjusting CRF value (lower = better quality)
-- Increase segment duration for lower latency networks
-- Use SSD for output directory
-
-### Sync Issues
-- Delete `genesis.json` to reset station time
-- Ensure system clock is accurate
-- Check network latency
-
-## Development
-
-### Project Structure
-```
-virtual-tv-station/
-├── main.go          # Main application
-├── dashboard.html   # Web UI (embedded)
-├── genesis.json     # Station start time (generated)
-├── stream/          # HLS output directory (generated)
-└── README.md        # Documentation
-```
-
-### Key Functions
-- `calculateCurrentPosition()` - Determines current playback position
-- `startFFmpeg()` - Spawns FFmpeg process with correct seek time
-- `watchdog()` - Monitors activity and stops idle streams
-- `tailscaleMiddleware()` - Validates Tailscale connectivity
-
-## License
-
-MIT License - Feel free to use and modify for your needs.
-
-## Credits
-
-Built with Go, FFmpeg, and HLS.js
+*   **Backend**: Go (Golang 1.20+). Handles HTTP serving, API logic, and FFmpeg process management.
+*   **Transcoding**: FFmpeg with NVENC. Outputting HLS (TS) and LL-HLS (fMP4) segments to a shared RAM disk.
+*   **Frontend**: HTML5/JS Dashboard embedded in the Go binary.
