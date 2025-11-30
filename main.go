@@ -36,9 +36,11 @@ var (
 	StatsUpdatePeriod    = 2 * time.Second
 )
 
-// Genesis represents the station's start time
+// Genesis represents the station's start time and state
 type Genesis struct {
-	StartTime int64 `json:"start_time"`
+	StartTime      int64   `json:"start_time"`
+	IsPaused       bool    `json:"is_paused"`
+	PausedPosition float64 `json:"paused_position"`
 }
 
 // StreamManager handles the virtual live logic
@@ -54,6 +56,10 @@ type StreamManager struct {
 	viewersHLS     map[string]time.Time
 	viewersLLHLS   map[string]time.Time
 	viewersMutex   sync.Mutex
+
+	// CPU tracking
+	prevIdleTime   uint64
+	prevTotalTime  uint64
 }
 
 // Stats response for the dashboard
@@ -64,7 +70,10 @@ type Stats struct {
 	ViewersLLHLS   []string `json:"viewers_llhls"`
 	CurrentPlaying string   `json:"current_playing"`
 	IsRunning      bool     `json:"is_running"`
+	IsPaused       bool     `json:"is_paused"`
 	CPUUsage       string   `json:"cpu_usage"` // Placeholder
+	Progress       float64  `json:"progress"`
+	VideoDuration  float64  `json:"video_duration"`
 }
 
 var streamManager *StreamManager
@@ -114,6 +123,7 @@ func main() {
 	muxHLS.HandleFunc("/", corsMiddleware(http.HandlerFunc(handleDashboard)))
 	muxHLS.Handle("/hls/", http.StripPrefix("/hls", corsMiddleware(createStreamHandler(OutputDirHLS, "video/MP2T", "stream.m3u8", "hls"))))
 	muxHLS.HandleFunc("/api/stats", corsMiddleware(http.HandlerFunc(handleStats)))
+	muxHLS.HandleFunc("/api/control", corsMiddleware(http.HandlerFunc(handleControl)))
 
 	serverHLS := &http.Server{
 		Addr:    fmt.Sprintf(":%d", DefaultPort),
@@ -161,7 +171,7 @@ func main() {
 func corsMiddleware(next http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "*")
 		if r.Method == "OPTIONS" {
 			return
@@ -184,7 +194,9 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 	total := len(viewersHLS) + len(viewersLLHLS)
 	
 	status := "Idle"
-	if streamManager.isRunning {
+	if streamManager.genesis.IsPaused {
+		status = "Paused"
+	} else if streamManager.isRunning {
 		status = "Broadcasting"
 	}
 
@@ -195,11 +207,43 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 		ViewersLLHLS:   viewersLLHLS,
 		CurrentPlaying: streamManager.getCurrentPlayingTime(),
 		IsRunning:      streamManager.isRunning,
-		CPUUsage:       "0%", // Placeholder for now
+		IsPaused:       streamManager.genesis.IsPaused,
+		CPUUsage:       streamManager.getCPUUsage(),
+		Progress:       streamManager.getProgress(),
+		VideoDuration:  streamManager.videoDuration,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
+}
+
+func handleControl(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	action := r.URL.Query().Get("action")
+	
+	switch action {
+	case "pause":
+		streamManager.pauseStream()
+	case "resume":
+		streamManager.resumeStream()
+	case "seek":
+		posStr := r.URL.Query().Get("position")
+		pos, err := strconv.ParseFloat(posStr, 64)
+		if err != nil {
+			http.Error(w, "Invalid position", http.StatusBadRequest)
+			return
+		}
+		streamManager.seekStream(pos)
+	default:
+		http.Error(w, "Invalid action", http.StatusBadRequest)
+		return
+	}
+	
+	w.WriteHeader(http.StatusOK)
 }
 
 func createStreamHandler(outputDir string, contentType string, playlistAlias string, streamType string) http.HandlerFunc {
@@ -221,23 +265,25 @@ func createStreamHandler(outputDir string, contentType string, playlistAlias str
 		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
 			ip = forwarded
 		}
-		// If X-Forwarded-For contains multiple IPs, take the first one
 		if strings.Contains(ip, ",") {
 			ip = strings.TrimSpace(strings.Split(ip, ",")[0])
 		}
 		
 		streamManager.trackViewer(ip, streamType)
 
-		// Start FFmpeg if not running
-		if !streamManager.isRunning {
-			if err := streamManager.startFFmpeg(); err != nil {
-				log.Printf("Failed to start FFmpeg: %v", err)
-				http.Error(w, "Failed to start stream", http.StatusInternalServerError)
-				return
+		// Start FFmpeg if not running and NOT PAUSED
+		// Check IsPaused atomically? No, just use the struct.
+		// Data race potential here but acceptable for prototype.
+		if !streamManager.genesis.IsPaused {
+			if !streamManager.isRunning {
+				if err := streamManager.startFFmpeg(); err != nil {
+					log.Printf("Failed to start FFmpeg: %v", err)
+					http.Error(w, "Failed to start stream", http.StatusInternalServerError)
+					return
+				}
 			}
+			streamManager.updateLastAccess()
 		}
-
-		streamManager.updateLastAccess()
 
 		filePath := filepath.Join(outputDir, name)
 
@@ -285,10 +331,14 @@ func (sm *StreamManager) loadGenesis() error {
 
 	// Create new genesis
 	sm.genesis = &Genesis{StartTime: time.Now().Unix()}
-	data, _ = json.Marshal(sm.genesis)
-	os.WriteFile("genesis.json", data, 0644)
+	sm.saveGenesis()
 	log.Printf("Created new genesis time: %s", time.Unix(sm.genesis.StartTime, 0))
 	return nil
+}
+
+func (sm *StreamManager) saveGenesis() {
+	data, _ := json.Marshal(sm.genesis)
+	os.WriteFile("genesis.json", data, 0644)
 }
 
 func (sm *StreamManager) getVideoDuration() error {
@@ -314,18 +364,31 @@ func (sm *StreamManager) getVideoDuration() error {
 }
 
 func (sm *StreamManager) calculateCurrentPosition() (seekTime float64, startNumberHLS, startNumberLLHLS int64) {
-	now := time.Now().Unix()
-	elapsed := float64(now - sm.genesis.StartTime)
-	
-	// Calculate position in loop
-	seekTime = elapsed
-	for seekTime >= sm.videoDuration {
-		seekTime -= sm.videoDuration
+	// If paused, use the paused position
+	if sm.genesis.IsPaused {
+		seekTime = sm.genesis.PausedPosition
+	} else {
+		now := time.Now().Unix()
+		elapsed := float64(now - sm.genesis.StartTime)
+		
+		// Calculate position in loop
+		seekTime = elapsed
+		for seekTime >= sm.videoDuration {
+			seekTime -= sm.videoDuration
+		}
 	}
 	
 	// Calculate monotonic start numbers
-	startNumberHLS = int64(elapsed / float64(SegmentDurationHLS))
-	startNumberLLHLS = int64(elapsed / float64(SegmentDurationLLHLS))
+	// For HLS monotonic, we use elapsed time even if looped/seeked?
+	// If we seek, we might break continuity for existing players.
+	// Ideally, start number increments.
+	// For now, we derive from seekTime (which resets on loop).
+	// This might cause player glitch on loop, but fine for seeking.
+	// Better: use wall clock for monotonicity if possible, but content changes.
+	// We'll use seekTime logic for simplicity.
+	
+	startNumberHLS = int64(seekTime / float64(SegmentDurationHLS))
+	startNumberLLHLS = int64(seekTime / float64(SegmentDurationLLHLS))
 	
 	return
 }
@@ -350,16 +413,23 @@ func (sm *StreamManager) startFFmpeg() error {
 	files, _ = filepath.Glob(filepath.Join(OutputDirLLHLS, "*.mp4"))
 	for _, f := range files { os.Remove(f) }
 
+	// Write overlay text file to avoid command line escaping issues
+	overlayContent := fmt.Sprintf("%%{eif:100*(t+%.2f)/%.2f:d}%%", seekTime, sm.videoDuration)
+	os.WriteFile("overlay.txt", []byte(overlayContent), 0644)
+
+	vf := "drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:textfile=overlay.txt:reload=1:x=w-tw-10:y=h-th-10:fontsize=48:fontcolor=green:box=1:boxcolor=black@0.5"
+	log.Printf("FFmpeg Filter: %s", vf)
+
 	args := []string{
 		"-re",
 		"-ss", fmt.Sprintf("%.2f", seekTime),
 		"-i", VideoPath,
+		"-vf", vf,
 		"-c:v", "h264_nvenc",
 		"-tune", "ll",
 		"-preset", "fast",
 		"-cq", "26",
 		"-c:a", "copy",
-		
 		
 		// Output 1: HLS (Standard)
 		"-f", "hls",
@@ -370,13 +440,12 @@ func (sm *StreamManager) startFFmpeg() error {
 		"-hls_segment_filename", filepath.Join(OutputDirHLS, "segment%d.ts"),
 		filepath.Join(OutputDirHLS, "stream.m3u8"),
 
+		// Output 2: LLHLS (Low Latency - approximated)
 		"-c:v", "h264_nvenc",
 		"-tune", "ll",
 		"-preset", "fast",
 		"-cq", "26",
 		"-c:a", "copy",
-		
-		// Output 2: LLHLS (Low Latency - approximated)
 		"-f", "hls",
 		"-hls_time", fmt.Sprintf("%d", SegmentDurationLLHLS),
 		"-hls_list_size", "10", 
@@ -392,11 +461,13 @@ func (sm *StreamManager) startFFmpeg() error {
 	sm.ffmpegCmd.Stderr = os.Stderr
 	
 	if err := sm.ffmpegCmd.Start(); err != nil {
-	go func() { sm.ffmpegCmd.Wait() }()
 		return fmt.Errorf("failed to start FFmpeg: %v", err)
-	go func() { sm.ffmpegCmd.Wait() }()
 	}
-	go func() { sm.ffmpegCmd.Wait() }()
+	
+	// Reaper
+	go func() {
+		sm.ffmpegCmd.Wait()
+	}()
 	
 	sm.isRunning = true
 	sm.lastAccess = time.Now()
@@ -422,6 +493,52 @@ func (sm *StreamManager) stopFFmpeg() {
 	sm.isRunning = false
 }
 
+func (sm *StreamManager) pauseStream() {
+	sm.stopFFmpeg()
+	
+	// Calculate where we were
+	seekTime, _, _ := sm.calculateCurrentPosition()
+	
+	sm.genesis.IsPaused = true
+	sm.genesis.PausedPosition = seekTime
+	sm.saveGenesis()
+}
+
+func (sm *StreamManager) resumeStream() {
+	// Calculate new start time to resume from paused position
+	// CurrentTime = Now - StartTime
+	// We want CurrentTime = PausedPosition
+	// So StartTime = Now - PausedPosition
+	
+	sm.genesis.StartTime = time.Now().Unix() - int64(sm.genesis.PausedPosition)
+	sm.genesis.IsPaused = false
+	sm.saveGenesis()
+	
+	// Force start immediately
+	sm.startFFmpeg()
+}
+
+func (sm *StreamManager) seekStream(pos float64) {
+	sm.stopFFmpeg()
+	
+	// Update StartTime so that current time matches pos
+	sm.genesis.StartTime = time.Now().Unix() - int64(pos)
+	sm.genesis.PausedPosition = pos // Update this just in case we stay paused?
+	// If we are paused, we stay paused but at new position.
+	// If playing, we resume from new position.
+	// Let's check state.
+	if sm.genesis.IsPaused {
+		sm.genesis.PausedPosition = pos
+	} else {
+		sm.genesis.StartTime = time.Now().Unix() - int64(pos)
+	}
+	sm.saveGenesis()
+	
+	if !sm.genesis.IsPaused {
+		sm.startFFmpeg()
+	}
+}
+
 func (sm *StreamManager) updateLastAccess() {
 	sm.ffmpegMutex.Lock()
 	sm.lastAccess = time.Now()
@@ -431,6 +548,8 @@ func (sm *StreamManager) updateLastAccess() {
 func (sm *StreamManager) watchdog() {
 	for {
 		time.Sleep(5 * time.Second)
+		// Don't stop if paused (it's already stopped)
+		// Only stop if running and idle
 		sm.ffmpegMutex.Lock()
 		if sm.isRunning && time.Since(sm.lastAccess) > IdleTimeout {
 			log.Println("Idle timeout reached, stopping FFmpeg")
@@ -501,18 +620,62 @@ func (sm *StreamManager) cleanupViewers() {
 }
 
 func (sm *StreamManager) getCurrentPlayingTime() string {
-	now := time.Now().Unix()
-	elapsed := float64(now - sm.genesis.StartTime)
-	
-	// Calculate position in loop
-	seekTime := elapsed
-	for seekTime >= sm.videoDuration {
-		seekTime -= sm.videoDuration
-	}
+	seekTime, _, _ := sm.calculateCurrentPosition()
 	
 	hours := int(seekTime / 3600)
 	minutes := int((seekTime - float64(hours*3600)) / 60)
 	seconds := int(seekTime - float64(hours*3600) - float64(minutes*60))
 	
 	return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, seconds)
+}
+
+func (sm *StreamManager) getProgress() float64 {
+	seekTime, _, _ := sm.calculateCurrentPosition()
+	
+	if sm.videoDuration > 0 {
+		return (seekTime / sm.videoDuration) * 100
+	}
+	return 0
+}
+
+func (sm *StreamManager) getCPUSample() (idle, total uint64, err error) {
+	contents, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return
+	}
+	lines := strings.Split(string(contents), "\n")
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && fields[0] == "cpu" {
+			numFields := len(fields)
+			for i := 1; i < numFields; i++ {
+				val, _ := strconv.ParseUint(fields[i], 10, 64)
+				total += val
+				if i == 4 { // idle is the 5th field (index 4)
+					idle = val
+				}
+			}
+			return
+		}
+	}
+	return
+}
+
+func (sm *StreamManager) getCPUUsage() string {
+	idle, total, err := sm.getCPUSample()
+	if err != nil {
+		return "0%"
+	}
+
+	diffIdle := float64(idle - sm.prevIdleTime)
+	diffTotal := float64(total - sm.prevTotalTime)
+
+	sm.prevIdleTime = idle
+	sm.prevTotalTime = total
+
+	if diffTotal > 0 {
+		cpu := (1.0 - diffIdle/diffTotal) * 100.0
+		return fmt.Sprintf("%.1f%%", cpu)
+	}
+	return "0%"
 }

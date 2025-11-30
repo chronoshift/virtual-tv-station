@@ -44,6 +44,7 @@
             background-color: #666;
         }
         .status-dot.active { background-color: #00ff00; box-shadow: 0 0 10px #00ff00; }
+        .status-dot.paused { background-color: #ffaa00; box-shadow: 0 0 10px #ffaa00; }
         
         .streams-container {
             display: flex;
@@ -79,6 +80,19 @@
             object-fit: contain;
         }
         
+        .progress-overlay {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            color: #fff;
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-weight: bold;
+            pointer-events: none;
+            z-index: 10;
+        }
+
         .stream-info {
             display: flex;
             justify-content: space-between;
@@ -125,7 +139,8 @@
             gap: 15px;
             width: 100%;
             max-width: 1200px;
-            margin-top: 20px;
+            margin-top: 0px;
+            margin-bottom: 20px;
         }
         .stat-card {
             background: #2a2a2a;
@@ -135,6 +150,36 @@
         }
         .stat-value { font-size: 24px; font-weight: bold; margin: 5px 0; }
         .stat-label { font-size: 12px; color: #888; }
+
+        .controls-section {
+            width: 100%;
+            max-width: 1200px;
+            background: #2a2a2a;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        .controls-header { font-size: 18px; font-weight: bold; }
+        .control-row { display: flex; align-items: center; gap: 20px; }
+        .control-btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 14px;
+            transition: opacity 0.2s;
+        }
+        .btn-pause { background-color: #ffaa00; color: #000; }
+        .btn-resume { background-color: #00ff00; color: #000; }
+        .control-btn:hover { opacity: 0.8; }
+        
+        .seek-container { flex: 1; display: flex; align-items: center; gap: 10px; }
+        input[type="range"] { flex: 1; accent-color: #00aaff; }
+        .seek-label { font-size: 14px; width: 60px; text-align: right; font-family: monospace; }
 
         .error-banner {
             background: #ff4444;
@@ -157,12 +202,44 @@
 
     <div id="error-message" class="error-banner"></div>
 
+    <!-- 1. Stats Grid -->
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-label">Total Viewers</div>
+            <div class="stat-value" id="viewer-count">-</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Current Playing</div>
+            <div class="stat-value" id="current-playing">-</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">CPU Usage</div>
+            <div class="stat-value" id="cpu-usage">0%</div>
+        </div>
+    </div>
+
+    <!-- 2. Broadcast Controls -->
+    <div class="controls-section">
+        <div class="controls-header">Broadcast Controls</div>
+        <div class="control-row">
+            <button id="btn-play-pause" class="control-btn btn-pause" onclick="togglePause()">Pause Broadcast</button>
+            
+            <div class="seek-container">
+                <span>Seek:</span>
+                <input type="range" id="seek-slider" min="0" max="100" value="0" step="0.1" onchange="seekStream(this.value)">
+                <span id="seek-value" class="seek-label">0%</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- 3. Streams -->
     <div class="streams-container">
         <!-- HLS Stream -->
         <div class="stream-card">
             <h2>Standard HLS (Port 8093)</h2>
             <div class="video-container">
                 <video id="video-hls" controls muted autoplay playsinline></video>
+                <div class="progress-overlay" id="progress-hls">0%</div>
             </div>
             <div class="stream-info">
                 <span>Latency: High (Reliable)</span>
@@ -181,6 +258,7 @@
             <h2>Low-Latency HLS (Port 3333)</h2>
             <div class="video-container">
                 <video id="video-llhls" controls muted autoplay playsinline></video>
+                <div class="progress-overlay" id="progress-llhls">0%</div>
             </div>
             <div class="stream-info">
                 <span>Latency: Low (~1s)</span>
@@ -195,24 +273,11 @@
         </div>
     </div>
 
-    <div class="stats-grid">
-        <div class="stat-card">
-            <div class="stat-label">Total Viewers</div>
-            <div class="stat-value" id="viewer-count">-</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-label">Current Playing</div>
-            <div class="stat-value" id="current-playing">-</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-label">CPU Usage</div>
-            <div class="stat-value" id="cpu-usage">0%</div>
-        </div>
-    </div>
-
     <script>
         const hlsUrl = `${window.location.protocol}//${window.location.hostname}:8093/hls/stream.m3u8`;
         const llhlsUrl = `${window.location.protocol}//${window.location.hostname}:3333/app/stream/llhls.m3u8`;
+        let videoDuration = 0;
+        let isPaused = false;
 
         document.getElementById('url-hls').textContent = hlsUrl;
         document.getElementById('url-llhls').textContent = llhlsUrl;
@@ -241,17 +306,14 @@
                     if (data.fatal) {
                         switch (data.type) {
                             case Hls.ErrorTypes.NETWORK_ERROR:
-                                stateEl.textContent = "Network Error - Retrying...";
+                                stateEl.textContent = "Buffering...";
                                 stateEl.style.color = "#ffaa00";
                                 hls.startLoad();
                                 break;
                             case Hls.ErrorTypes.MEDIA_ERROR:
-                                stateEl.textContent = "Media Error - Recovering...";
                                 hls.recoverMediaError();
                                 break;
                             default:
-                                stateEl.textContent = "Fatal Error";
-                                stateEl.style.color = "#ff4444";
                                 hls.destroy();
                                 break;
                         }
@@ -261,32 +323,20 @@
                 return hls;
             } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
                 video.src = url;
-                video.addEventListener('loadedmetadata', () => {
-                    video.play();
-                });
                 stateEl.textContent = "Native HLS";
-                return null;
-            } else {
-                stateEl.textContent = "Not Supported";
                 return null;
             }
         }
 
-        // Initialize Players
         setupPlayer('video-hls', hlsUrl, 'hls-state');
         setupPlayer('video-llhls', llhlsUrl, 'llhls-state');
 
         function updateClientList(listId, headerId, clients) {
             const list = document.getElementById(listId);
             const header = document.getElementById(headerId);
-            
-            // Update header count
             const count = clients ? clients.length : 0;
             header.textContent = `Clients (${count})`;
-
-            // Clear list
             list.innerHTML = '';
-
             if (clients && clients.length > 0) {
                 clients.forEach(ip => {
                     const li = document.createElement('li');
@@ -302,20 +352,44 @@
             }
         }
 
-        // Stats Polling
+        function togglePause() {
+            const action = isPaused ? 'resume' : 'pause';
+            fetch(`/api/control?action=${action}`, { method: 'POST' })
+                .then(res => {
+                    if (res.ok) updateStats();
+                });
+        }
+
+        function seekStream(percent) {
+            if (videoDuration > 0) {
+                const seconds = (percent / 100) * videoDuration;
+                fetch(`/api/control?action=seek&position=${seconds}`, { method: 'POST' });
+            }
+        }
+
         function updateStats() {
             fetch('/api/stats')
                 .then(response => response.json())
                 .then(data => {
-                    // Update Status Dot
+                    videoDuration = data.video_duration;
+                    isPaused = data.is_paused;
+
+                    // Update Status
                     const statusDot = document.getElementById('status-dot');
                     const statusText = document.getElementById('status-text');
                     
-                    if (data.is_running) {
-                        statusDot.classList.add('active');
+                    if (data.status === "Paused") {
+                        statusDot.className = 'status-dot paused';
+                        statusText.textContent = "Broadcast Paused";
+                        document.getElementById('btn-play-pause').textContent = "Resume Broadcast";
+                        document.getElementById('btn-play-pause').className = "control-btn btn-resume";
+                    } else if (data.is_running) {
+                        statusDot.className = 'status-dot active';
                         statusText.textContent = "Broadcasting";
+                        document.getElementById('btn-play-pause').textContent = "Pause Broadcast";
+                        document.getElementById('btn-play-pause').className = "control-btn btn-pause";
                     } else {
-                        statusDot.classList.remove('active');
+                        statusDot.className = 'status-dot';
                         statusText.textContent = "Idle / Offline";
                     }
 
@@ -324,23 +398,28 @@
                     document.getElementById('current-playing').textContent = data.current_playing || "Stopped";
                     document.getElementById('cpu-usage').textContent = data.cpu_usage || "0%";
                     
-                    // Update Client Lists
+                    // Update Lists
                     updateClientList('list-clients-hls', 'header-clients-hls', data.viewers_hls);
                     updateClientList('list-clients-llhls', 'header-clients-llhls', data.viewers_llhls);
 
-                    // Hide error
+                    // Update Overlays & Slider
+                    const progress = data.progress ? data.progress.toFixed(1) + "%" : "0%";
+                    document.getElementById("progress-hls").textContent = progress;
+                    document.getElementById("progress-llhls").textContent = progress;
+                    
+                    // Only update slider if user isn't dragging it (simple check: focus)
+                    if (document.activeElement.id !== 'seek-slider') {
+                        document.getElementById('seek-slider').value = data.progress || 0;
+                        document.getElementById('seek-value').textContent = progress;
+                    }
+
                     document.getElementById('error-message').style.display = 'none';
                 })
                 .catch(err => {
-                    console.error("Stats error:", err);
-                    document.getElementById('error-message').textContent = "Failed to connect to server stats.";
                     document.getElementById('error-message').style.display = 'block';
-                    document.getElementById('status-dot').classList.remove('active');
-                    document.getElementById('status-text').textContent = "Disconnected";
                 });
         }
 
-        // Poll every 2 seconds
         setInterval(updateStats, 2000);
         updateStats();
     </script>
