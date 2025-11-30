@@ -385,8 +385,11 @@ func (sm *StreamManager) startFFmpeg() error {
 	sm.ffmpegCmd.Stderr = os.Stderr
 	
 	if err := sm.ffmpegCmd.Start(); err != nil {
+	go func() { sm.ffmpegCmd.Wait() }()
 		return fmt.Errorf("failed to start FFmpeg: %v", err)
+	go func() { sm.ffmpegCmd.Wait() }()
 	}
+	go func() { sm.ffmpegCmd.Wait() }()
 	
 	sm.isRunning = true
 	sm.lastAccess = time.Now()
