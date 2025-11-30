@@ -354,9 +354,9 @@ func (sm *StreamManager) startFFmpeg() error {
 		"-re",
 		"-ss", fmt.Sprintf("%.2f", seekTime),
 		"-i", VideoPath,
-		"-c:v", "libx264",
+		"-c:v", "h264_nvenc",
 		"-preset", "fast",
-		"-crf", "23",
+		"-cq", "26",
 		"-c:a", "aac",
 		"-b:a", "128k",
 		
@@ -369,6 +369,11 @@ func (sm *StreamManager) startFFmpeg() error {
 		"-hls_segment_filename", filepath.Join(OutputDirHLS, "segment%d.ts"),
 		filepath.Join(OutputDirHLS, "stream.m3u8"),
 
+		"-c:v", "h264_nvenc",
+		"-preset", "fast",
+		"-cq", "26",
+		"-c:a", "aac",
+		"-b:a", "128k",
 		// Output 2: LLHLS (Low Latency - approximated)
 		"-f", "hls",
 		"-hls_time", fmt.Sprintf("%d", SegmentDurationLLHLS),

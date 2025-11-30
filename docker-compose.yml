@@ -17,7 +17,16 @@ services:
       - /app/stream
       
     environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
       - VIDEO_PATH=/video.mp4
       - PORT=8093
       - LLHLS_PORT=3333
     restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
