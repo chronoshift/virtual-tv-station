@@ -1,17 +1,17 @@
 package main
 
 import (
-	"context"
 	_ "embed"
+	"context"
 	"encoding/json"
 	"fmt"
-	"html/template"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,161 +48,246 @@ type StreamManager struct {
 	ffmpegCmd      *exec.Cmd
 	ffmpegMutex    sync.Mutex
 	lastAccess     time.Time
-	accessMutex    sync.Mutex
-	viewers        map[string]time.Time
-	viewersMutex   sync.RWMutex
-	isRunning        bool
-	currentSeek      float64
-	startNumberHLS   int64
-	startNumberLLHLS int64
+	isRunning      bool
+	
+	// Viewer tracking
+	viewersHLS     map[string]time.Time
+	viewersLLHLS   map[string]time.Time
+	viewersMutex   sync.Mutex
 }
 
-// Stats represents the current system statistics
+// Stats response for the dashboard
 type Stats struct {
-	Status         string  `json:"status"`
-	ViewerCount    int     `json:"viewer_count"`
-	CurrentPlaying string  `json:"current_playing"`
-	CPUUsage       float64 `json:"cpu_usage"`
-	IsRunning      bool    `json:"is_running"`
+	Status         string   `json:"status"`
+	ViewerCount    int      `json:"viewer_count"`
+	ViewersHLS     []string `json:"viewers_hls"`
+	ViewersLLHLS   []string `json:"viewers_llhls"`
+	CurrentPlaying string   `json:"current_playing"`
+	IsRunning      bool     `json:"is_running"`
+	CPUUsage       string   `json:"cpu_usage"` // Placeholder
 }
 
 var streamManager *StreamManager
 
 func init() {
-	if port := os.Getenv("PORT"); port != "" {
-		if p, err := strconv.Atoi(port); err == nil {
-			DefaultPort = p
+	// Environment overrides
+	if p := os.Getenv("PORT"); p != "" {
+		if i, err := strconv.Atoi(p); err == nil {
+			DefaultPort = i
 		}
 	}
-	if port := os.Getenv("LLHLS_PORT"); port != "" {
-		if p, err := strconv.Atoi(port); err == nil {
-			LLHLSPort = p
+	if p := os.Getenv("LLHLS_PORT"); p != "" {
+		if i, err := strconv.Atoi(p); err == nil {
+			LLHLSPort = i
 		}
 	}
-	if path := os.Getenv("VIDEO_PATH"); path != "" {
-		VideoPath = path
+	if v := os.Getenv("VIDEO_PATH"); v != "" {
+		VideoPath = v
 	}
 }
 
 func main() {
 	// Create output directories
-	if err := os.MkdirAll(OutputDirHLS, 0755); err != nil {
-		log.Fatalf("Failed to create HLS output directory: %v", err)
-	}
-	if err := os.MkdirAll(OutputDirLLHLS, 0755); err != nil {
-		log.Fatalf("Failed to create LLHLS output directory: %v", err)
-	}
+	os.MkdirAll(OutputDirHLS, 0755)
+	os.MkdirAll(OutputDirLLHLS, 0755)
 
-	// Initialize stream manager
 	streamManager = &StreamManager{
-		viewers: make(map[string]time.Time),
+		viewersHLS:   make(map[string]time.Time),
+		viewersLLHLS: make(map[string]time.Time),
+		lastAccess:   time.Now(),
 	}
 
-	// Load or create genesis
 	if err := streamManager.loadGenesis(); err != nil {
 		log.Fatalf("Failed to load genesis: %v", err)
 	}
 
-	// Get video duration
 	if err := streamManager.getVideoDuration(); err != nil {
 		log.Fatalf("Failed to get video duration: %v", err)
 	}
 
-	// Start watchdog
+	// Start background tasks
 	go streamManager.watchdog()
-
-	// Start viewer cleanup
 	go streamManager.cleanupViewers()
 
-	// Setup HLS Server (Port 8093)
+	// HLS Server
 	muxHLS := http.NewServeMux()
-	muxHLS.HandleFunc("/", corsMiddleware(handleDashboard))
-	muxHLS.Handle("/hls/", http.StripPrefix("/hls", corsMiddleware(createStreamHandler(OutputDirHLS, "video/MP2T", "stream.m3u8"))))
-	muxHLS.HandleFunc("/api/stats", corsMiddleware(handleStats))
-
-	// Setup LLHLS Server (Port 3333)
-	muxLLHLS := http.NewServeMux()
-	muxLLHLS.Handle("/app/stream/", http.StripPrefix("/app/stream", corsMiddleware(createStreamHandler(OutputDirLLHLS, "video/iso.segment", "llhls.m3u8"))))
-	// LLHLS uses fmp4/m4s
-
-	// Setup graceful shutdown
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	muxHLS.HandleFunc("/", corsMiddleware(http.HandlerFunc(handleDashboard)))
+	muxHLS.Handle("/hls/", http.StripPrefix("/hls", corsMiddleware(createStreamHandler(OutputDirHLS, "video/MP2T", "stream.m3u8", "hls"))))
+	muxHLS.HandleFunc("/api/stats", corsMiddleware(http.HandlerFunc(handleStats)))
 
 	serverHLS := &http.Server{
 		Addr:    fmt.Sprintf(":%d", DefaultPort),
 		Handler: muxHLS,
 	}
 
+	// LLHLS Server
+	muxLLHLS := http.NewServeMux()
+	muxLLHLS.Handle("/app/stream/", http.StripPrefix("/app/stream", corsMiddleware(createStreamHandler(OutputDirLLHLS, "video/iso.segment", "llhls.m3u8", "llhls"))))
+
 	serverLLHLS := &http.Server{
 		Addr:    fmt.Sprintf(":%d", LLHLSPort),
 		Handler: muxLLHLS,
 	}
 
+	// Start servers
 	go func() {
 		log.Printf("Starting HLS Station on port %d", DefaultPort)
 		if err := serverHLS.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("HLS Server failed: %v", err)
+			log.Fatalf("HLS Server error: %v", err)
 		}
 	}()
 
 	go func() {
 		log.Printf("Starting LLHLS Station on port %d", LLHLSPort)
 		if err := serverLLHLS.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("LLHLS Server failed: %v", err)
+			log.Fatalf("LLHLS Server error: %v", err)
 		}
 	}()
 
-	<-sigChan
+	// Graceful shutdown
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	<-c
 	log.Println("Shutting down...")
-
+	streamManager.stopFFmpeg()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
-	streamManager.stopFFmpeg()
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		serverHLS.Shutdown(ctx)
-	}()
-	go func() {
-		defer wg.Done()
-		serverLLHLS.Shutdown(ctx)
-	}()
-	wg.Wait()
+	serverHLS.Shutdown(ctx)
+	serverLLHLS.Shutdown(ctx)
 }
 
-func (sm *StreamManager) loadGenesis() error {
-	genesisPath := "genesis.json"
+// Handlers
+
+func corsMiddleware(next http.Handler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+		if r.Method == "OPTIONS" {
+			return
+		}
+		next.ServeHTTP(w, r)
+	}
+}
+
+func handleDashboard(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" && r.URL.Path != "/index.html" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(dashboardHTML))
+}
+
+func handleStats(w http.ResponseWriter, r *http.Request) {
+	viewersHLS, viewersLLHLS := streamManager.getViewerStats()
+	total := len(viewersHLS) + len(viewersLLHLS)
 	
-	// Try to load existing genesis
-	data, err := os.ReadFile(genesisPath)
+	status := "Idle"
+	if streamManager.isRunning {
+		status = "Broadcasting"
+	}
+
+	stats := Stats{
+		Status:         status,
+		ViewerCount:    total,
+		ViewersHLS:     viewersHLS,
+		ViewersLLHLS:   viewersLLHLS,
+		CurrentPlaying: streamManager.getCurrentPlayingTime(),
+		IsRunning:      streamManager.isRunning,
+		CPUUsage:       "0%", // Placeholder for now
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stats)
+}
+
+func createStreamHandler(outputDir string, contentType string, playlistAlias string, streamType string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		name := strings.TrimPrefix(path, "/")
+		if name == "" {
+			http.NotFound(w, r)
+			return
+		}
+
+		// Handle playlist alias
+		if name == playlistAlias {
+			name = "stream.m3u8"
+		}
+
+		// Track viewer
+		ip := r.RemoteAddr
+		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+			ip = forwarded
+		}
+		// If X-Forwarded-For contains multiple IPs, take the first one
+		if strings.Contains(ip, ",") {
+			ip = strings.TrimSpace(strings.Split(ip, ",")[0])
+		}
+		
+		streamManager.trackViewer(ip, streamType)
+
+		// Start FFmpeg if not running
+		if !streamManager.isRunning {
+			if err := streamManager.startFFmpeg(); err != nil {
+				log.Printf("Failed to start FFmpeg: %v", err)
+				http.Error(w, "Failed to start stream", http.StatusInternalServerError)
+				return
+			}
+		}
+
+		streamManager.updateLastAccess()
+
+		filePath := filepath.Join(outputDir, name)
+
+		// Wait loop for file existence
+		for i := 0; i < 20; i++ {
+			if _, err := os.Stat(filePath); err == nil {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			http.Error(w, "File not found", http.StatusNotFound)
+			return
+		}
+
+		// Set Content-Type
+		if strings.HasSuffix(name, ".m3u8") {
+			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		} else if strings.HasSuffix(name, ".ts") {
+			w.Header().Set("Content-Type", "video/MP2T")
+		} else if strings.HasSuffix(name, ".m4s") {
+			w.Header().Set("Content-Type", "video/iso.segment")
+		} else {
+			w.Header().Set("Content-Type", contentType)
+		}
+		
+		w.Header().Set("Cache-Control", "no-cache")
+		http.ServeFile(w, r, filePath)
+	}
+}
+
+// StreamManager Methods
+
+func (sm *StreamManager) loadGenesis() error {
+	data, err := os.ReadFile("genesis.json")
 	if err == nil {
-		genesis := &Genesis{}
-		if err := json.Unmarshal(data, genesis); err == nil {
-			sm.genesis = genesis
-			log.Printf("Loaded genesis time: %v", time.Unix(sm.genesis.StartTime, 0))
+		var g Genesis
+		if err := json.Unmarshal(data, &g); err == nil {
+			sm.genesis = &g
+			log.Printf("Loaded genesis time: %s", time.Unix(g.StartTime, 0))
 			return nil
 		}
 	}
 
 	// Create new genesis
-	sm.genesis = &Genesis{
-		StartTime: time.Now().Unix(),
-	}
-	
-	data, err = json.MarshalIndent(sm.genesis, "", "  ")
-	if err != nil {
-		return err
-	}
-	
-	if err := os.WriteFile(genesisPath, data, 0644); err != nil {
-		return err
-	}
-	
-	log.Printf("Created new genesis time: %v", time.Unix(sm.genesis.StartTime, 0))
+	sm.genesis = &Genesis{StartTime: time.Now().Unix()}
+	data, _ = json.Marshal(sm.genesis)
+	os.WriteFile("genesis.json", data, 0644)
+	log.Printf("Created new genesis time: %s", time.Unix(sm.genesis.StartTime, 0))
 	return nil
 }
 
@@ -230,19 +315,19 @@ func (sm *StreamManager) getVideoDuration() error {
 
 func (sm *StreamManager) calculateCurrentPosition() (seekTime float64, startNumberHLS, startNumberLLHLS int64) {
 	now := time.Now().Unix()
-	elapsed := now - sm.genesis.StartTime
+	elapsed := float64(now - sm.genesis.StartTime)
 	
-	// Calculate seek position in current loop
-	seekTime = float64(elapsed) 
+	// Calculate position in loop
+	seekTime = elapsed
 	for seekTime >= sm.videoDuration {
 		seekTime -= sm.videoDuration
 	}
 	
-	// Calculate segment start numbers (never reset)
-	startNumberHLS = elapsed / int64(SegmentDurationHLS)
-	startNumberLLHLS = elapsed / int64(SegmentDurationLLHLS)
+	// Calculate monotonic start numbers
+	startNumberHLS = int64(elapsed / float64(SegmentDurationHLS))
+	startNumberLLHLS = int64(elapsed / float64(SegmentDurationLLHLS))
 	
-	return seekTime, startNumberHLS, startNumberLLHLS
+	return
 }
 
 func (sm *StreamManager) startFFmpeg() error {
@@ -254,28 +339,17 @@ func (sm *StreamManager) startFFmpeg() error {
 	}
 	
 	seekTime, startNumberHLS, startNumberLLHLS := sm.calculateCurrentPosition()
-	sm.currentSeek = seekTime
-	sm.startNumberHLS = startNumberHLS
-	sm.startNumberLLHLS = startNumberLLHLS
 	
 	log.Printf("Starting FFmpeg at seek: %.2f, HLS segment: %d, LLHLS segment: %d", seekTime, startNumberHLS, startNumberLLHLS)
 	
-	// Clean up old segments in both directories
-	filesHLS, _ := filepath.Glob(filepath.Join(OutputDirHLS, "*.ts"))
-	for _, f := range filesHLS {
-		os.Remove(f)
-	}
-	filesLLHLS, _ := filepath.Glob(filepath.Join(OutputDirLLHLS, "*.m4s")) // LLHLS uses m4s/mp4 usually, but let's stick to basic naming if possible or check args
-	for _, f := range filesLLHLS {
-		os.Remove(f)
-	}
-	// Also clean .mp4 init segments for fmp4 if present
-	filesMp4, _ := filepath.Glob(filepath.Join(OutputDirLLHLS, "*.mp4"))
-	for _, f := range filesMp4 {
-		os.Remove(f)
-	}
-	
-	// Build FFmpeg command with dual outputs
+	// Clean up old segments
+	files, _ := filepath.Glob(filepath.Join(OutputDirHLS, "*.ts"))
+	for _, f := range files { os.Remove(f) }
+	files, _ = filepath.Glob(filepath.Join(OutputDirLLHLS, "*.m4s"))
+	for _, f := range files { os.Remove(f) }
+	files, _ = filepath.Glob(filepath.Join(OutputDirLLHLS, "*.mp4"))
+	for _, f := range files { os.Remove(f) }
+
 	args := []string{
 		"-re",
 		"-ss", fmt.Sprintf("%.2f", seekTime),
@@ -295,12 +369,12 @@ func (sm *StreamManager) startFFmpeg() error {
 		"-hls_segment_filename", filepath.Join(OutputDirHLS, "segment%d.ts"),
 		filepath.Join(OutputDirHLS, "stream.m3u8"),
 
-		// Output 2: LLHLS (Low Latency - approximated with shorter segments and fmp4)
+		// Output 2: LLHLS (Low Latency - approximated)
 		"-f", "hls",
 		"-hls_time", fmt.Sprintf("%d", SegmentDurationLLHLS),
-		"-hls_list_size", "10", // Keep more segments for LLHLS safety
+		"-hls_list_size", "10", 
 		"-hls_flags", "delete_segments",
-		"-hls_segment_type", "fmp4", // Fragmented MP4 for LLHLS
+		"-hls_segment_type", "fmp4",
 		"-start_number", fmt.Sprintf("%d", startNumberLLHLS),
 		"-hls_segment_filename", filepath.Join(OutputDirLLHLS, "segment%d.m4s"),
 		filepath.Join(OutputDirLLHLS, "stream.m3u8"),
@@ -315,9 +389,9 @@ func (sm *StreamManager) startFFmpeg() error {
 	}
 	
 	sm.isRunning = true
-	sm.updateLastAccess()
+	sm.lastAccess = time.Now()
 	
-	// Wait for playlist to be generated (check HLS as primary)
+	// Wait for playlist
 	for i := 0; i < 20; i++ {
 		if _, err := os.Stat(filepath.Join(OutputDirHLS, "stream.m3u8")); err == nil {
 			break
@@ -332,78 +406,84 @@ func (sm *StreamManager) stopFFmpeg() {
 	sm.ffmpegMutex.Lock()
 	defer sm.ffmpegMutex.Unlock()
 	
-	if !sm.isRunning || sm.ffmpegCmd == nil {
-		return
+	if sm.ffmpegCmd != nil && sm.ffmpegCmd.Process != nil {
+		sm.ffmpegCmd.Process.Kill()
 	}
-	
-	log.Println("Stopping FFmpeg...")
-	
-	if sm.ffmpegCmd.Process != nil {
-		sm.ffmpegCmd.Process.Signal(syscall.SIGTERM)
-		sm.ffmpegCmd.Wait()
-	}
-	
 	sm.isRunning = false
-	sm.ffmpegCmd = nil
 }
 
 func (sm *StreamManager) updateLastAccess() {
-	sm.accessMutex.Lock()
-	defer sm.accessMutex.Unlock()
+	sm.ffmpegMutex.Lock()
 	sm.lastAccess = time.Now()
-}
-
-func (sm *StreamManager) getLastAccess() time.Time {
-	sm.accessMutex.Lock()
-	defer sm.accessMutex.Unlock()
-	return sm.lastAccess
+	sm.ffmpegMutex.Unlock()
 }
 
 func (sm *StreamManager) watchdog() {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-	
-	for range ticker.C {
-		if sm.isRunning {
-			lastAccess := sm.getLastAccess()
-			if time.Since(lastAccess) > IdleTimeout {
-				log.Println("Idle timeout reached, stopping FFmpeg")
-				sm.stopFFmpeg()
+	for {
+		time.Sleep(5 * time.Second)
+		sm.ffmpegMutex.Lock()
+		if sm.isRunning && time.Since(sm.lastAccess) > IdleTimeout {
+			log.Println("Idle timeout reached, stopping FFmpeg")
+			if sm.ffmpegCmd != nil && sm.ffmpegCmd.Process != nil {
+				sm.ffmpegCmd.Process.Kill()
 			}
+			sm.isRunning = false
 		}
+		sm.ffmpegMutex.Unlock()
 	}
 }
 
-func (sm *StreamManager) trackViewer(ip string) {
+// Viewer Tracking
+
+func (sm *StreamManager) trackViewer(ip string, streamType string) {
 	sm.viewersMutex.Lock()
 	defer sm.viewersMutex.Unlock()
-	sm.viewers[ip] = time.Now()
+	
+	now := time.Now()
+	if streamType == "hls" {
+		sm.viewersHLS[ip] = now
+	} else if streamType == "llhls" {
+		sm.viewersLLHLS[ip] = now
+	}
 }
 
-func (sm *StreamManager) getViewerCount() int {
-	sm.viewersMutex.RLock()
-	defer sm.viewersMutex.RUnlock()
+func (sm *StreamManager) getViewerStats() (hlsViewers []string, llhlsViewers []string) {
+	sm.viewersMutex.Lock()
+	defer sm.viewersMutex.Unlock()
 	
-	count := 0
-	now := time.Now()
-	for _, lastSeen := range sm.viewers {
-		if now.Sub(lastSeen) < 60*time.Second {
-			count++
+	cutoff := time.Now().Add(-60 * time.Second)
+	
+	for ip, lastSeen := range sm.viewersHLS {
+		if lastSeen.After(cutoff) {
+			hlsViewers = append(hlsViewers, ip)
 		}
 	}
-	return count
+	sort.Strings(hlsViewers)
+	
+	for ip, lastSeen := range sm.viewersLLHLS {
+		if lastSeen.After(cutoff) {
+			llhlsViewers = append(llhlsViewers, ip)
+		}
+	}
+	sort.Strings(llhlsViewers)
+	
+	return
 }
 
 func (sm *StreamManager) cleanupViewers() {
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-	
-	for range ticker.C {
+	for {
+		time.Sleep(10 * time.Second)
 		sm.viewersMutex.Lock()
-		now := time.Now()
-		for ip, lastSeen := range sm.viewers {
-			if now.Sub(lastSeen) > 60*time.Second {
-				delete(sm.viewers, ip)
+		cutoff := time.Now().Add(-60 * time.Second)
+		
+		for ip, lastSeen := range sm.viewersHLS {
+			if lastSeen.Before(cutoff) {
+				delete(sm.viewersHLS, ip)
+			}
+		}
+		for ip, lastSeen := range sm.viewersLLHLS {
+			if lastSeen.Before(cutoff) {
+				delete(sm.viewersLLHLS, ip)
 			}
 		}
 		sm.viewersMutex.Unlock()
@@ -411,198 +491,18 @@ func (sm *StreamManager) cleanupViewers() {
 }
 
 func (sm *StreamManager) getCurrentPlayingTime() string {
-	seekTime, _, _ := sm.calculateCurrentPosition()
-	hours := int(seekTime) / 3600
-	minutes := (int(seekTime) % 3600) / 60
-	seconds := int(seekTime) % 60
+	now := time.Now().Unix()
+	elapsed := float64(now - sm.genesis.StartTime)
+	
+	// Calculate position in loop
+	seekTime := elapsed
+	for seekTime >= sm.videoDuration {
+		seekTime -= sm.videoDuration
+	}
+	
+	hours := int(seekTime / 3600)
+	minutes := int((seekTime - float64(hours*3600)) / 60)
+	seconds := int(seekTime - float64(hours*3600) - float64(minutes*60))
+	
 	return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, seconds)
-}
-
-
-func corsMiddleware(handler http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "*")
-
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
-		handler(w, r)
-	}
-}
-
-
-func handleDashboard(w http.ResponseWriter, r *http.Request) {
-	tmpl, err := template.New("dashboard").Parse(dashboardHTML)
-	if err != nil {
-		http.Error(w, "Template error", http.StatusInternalServerError)
-		return
-	}
-	
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	tmpl.Execute(w, nil)
-}
-
-func handleStats(w http.ResponseWriter, r *http.Request) {
-	stats := Stats{
-		Status:         "Idle",
-		ViewerCount:    streamManager.getViewerCount(),
-		CurrentPlaying: streamManager.getCurrentPlayingTime(),
-		IsRunning:      streamManager.isRunning,
-	}
-	
-	if streamManager.isRunning {
-		stats.Status = "Online"
-	}
-	
-	// Get CPU usage if FFmpeg is running (simplified)
-	if streamManager.isRunning && streamManager.ffmpegCmd != nil && streamManager.ffmpegCmd.Process != nil {
-		// This is a placeholder - actual CPU monitoring would require more complex implementation
-		stats.CPUUsage = 0.0
-	}
-	
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(stats)
-}
-
-func createPlaylistHandler(outputDir string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// Track viewer
-		ip := r.RemoteAddr
-		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-			ip = forwarded
-		}
-		streamManager.trackViewer(ip)
-
-		// Start FFmpeg if not running
-		if !streamManager.isRunning {
-			if err := streamManager.startFFmpeg(); err != nil {
-				http.Error(w, "Failed to start stream", http.StatusInternalServerError)
-				return
-			}
-		}
-
-		streamManager.updateLastAccess()
-
-		// Serve the playlist
-		playlistPath := filepath.Join(outputDir, "stream.m3u8")
-
-		// Wait for playlist to exist
-		for i := 0; i < 20; i++ {
-			if _, err := os.Stat(playlistPath); err == nil {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-
-		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-		w.Header().Set("Cache-Control", "no-cache")
-		http.ServeFile(w, r, playlistPath)
-	}
-}
-
-func createSegmentHandler(outputDir string, contentType string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// Track viewer
-		ip := r.RemoteAddr
-		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-			ip = forwarded
-		}
-		streamManager.trackViewer(ip)
-		streamManager.updateLastAccess()
-
-		// Get segment name from query
-		segmentName := r.URL.Query().Get("name")
-		if segmentName == "" {
-			http.Error(w, "Missing segment name", http.StatusBadRequest)
-			return
-		}
-
-		segmentPath := filepath.Join(outputDir, segmentName)
-
-		// Wait for segment to exist (max 5 seconds)
-		for i := 0; i < 50; i++ {
-			if _, err := os.Stat(segmentPath); err == nil {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-
-		w.Header().Set("Content-Type", contentType)
-		w.Header().Set("Cache-Control", "no-cache")
-		http.ServeFile(w, r, segmentPath)
-	}
-}
-
-
-
-
-func createStreamHandler(outputDir string, contentType string, playlistAlias string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		path := r.URL.Path
-		// path is already stripped of prefix by http.StripPrefix if used correctly
-		name := strings.TrimPrefix(path, "/")
-		if name == "" {
-			http.NotFound(w, r)
-			return
-		}
-
-		// Handle playlist alias
-		if name == playlistAlias {
-			name = "stream.m3u8"
-		}
-
-		// Track viewer
-		ip := r.RemoteAddr
-		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-			ip = forwarded
-		}
-		streamManager.trackViewer(ip)
-
-		// Start FFmpeg if not running
-		// We check isRunning. Note: access to isRunning should probably be locked if it wasn't atomic/safe, 
-		// but we follow the pattern in createPlaylistHandler.
-		// Assuming isRunning is a field of StreamManager accessible here.
-		if !streamManager.isRunning {
-			if err := streamManager.startFFmpeg(); err != nil {
-				log.Printf("Failed to start FFmpeg: %v", err)
-				http.Error(w, "Failed to start stream", http.StatusInternalServerError)
-				return
-			}
-		}
-
-		streamManager.updateLastAccess()
-
-		filePath := filepath.Join(outputDir, name)
-
-		// Wait loop for file existence (especially if we just started FFmpeg)
-		for i := 0; i < 20; i++ {
-			if _, err := os.Stat(filePath); err == nil {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-
-		if _, err := os.Stat(filePath); os.IsNotExist(err) {
-			http.Error(w, "File not found", http.StatusNotFound)
-			return
-		}
-
-		// Set Content-Type
-		if strings.HasSuffix(name, ".m3u8") {
-			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-		} else if strings.HasSuffix(name, ".ts") {
-			w.Header().Set("Content-Type", "video/MP2T")
-		} else if strings.HasSuffix(name, ".m4s") {
-			w.Header().Set("Content-Type", "video/iso.segment")
-		} else {
-			w.Header().Set("Content-Type", contentType)
-		}
-		
-		w.Header().Set("Cache-Control", "no-cache")
-		http.ServeFile(w, r, filePath)
-	}
 }

@@ -97,6 +97,28 @@
             margin-top: 10px;
         }
 
+        .clients-list {
+            background: #1a1a1a;
+            padding: 10px;
+            border-radius: 4px;
+            margin-top: 10px;
+            font-size: 13px;
+            color: #ccc;
+            max-height: 100px;
+            overflow-y: auto;
+        }
+        .clients-list h4 {
+            margin: 0 0 5px 0;
+            font-size: 14px;
+            color: #fff;
+            border-bottom: 1px solid #333;
+            padding-bottom: 5px;
+        }
+        .clients-list ul {
+            margin: 0;
+            padding-left: 20px;
+        }
+
         .stats-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -147,6 +169,11 @@
                 <span id="hls-state">Initializing...</span>
             </div>
             <div class="stream-url" id="url-hls"></div>
+            
+            <div class="clients-list">
+                <h4 id="header-clients-hls">Clients (0)</h4>
+                <ul id="list-clients-hls"></ul>
+            </div>
         </div>
 
         <!-- LL-HLS Stream -->
@@ -160,12 +187,17 @@
                 <span id="llhls-state">Initializing...</span>
             </div>
             <div class="stream-url" id="url-llhls"></div>
+
+            <div class="clients-list">
+                <h4 id="header-clients-llhls">Clients (0)</h4>
+                <ul id="list-clients-llhls"></ul>
+            </div>
         </div>
     </div>
 
     <div class="stats-grid">
         <div class="stat-card">
-            <div class="stat-label">Viewer Count</div>
+            <div class="stat-label">Total Viewers</div>
             <div class="stat-value" id="viewer-count">-</div>
         </div>
         <div class="stat-card">
@@ -244,6 +276,32 @@
         setupPlayer('video-hls', hlsUrl, 'hls-state');
         setupPlayer('video-llhls', llhlsUrl, 'llhls-state');
 
+        function updateClientList(listId, headerId, clients) {
+            const list = document.getElementById(listId);
+            const header = document.getElementById(headerId);
+            
+            // Update header count
+            const count = clients ? clients.length : 0;
+            header.textContent = `Clients (${count})`;
+
+            // Clear list
+            list.innerHTML = '';
+
+            if (clients && clients.length > 0) {
+                clients.forEach(ip => {
+                    const li = document.createElement('li');
+                    li.textContent = ip;
+                    list.appendChild(li);
+                });
+            } else {
+                const li = document.createElement('li');
+                li.textContent = "No active clients";
+                li.style.listStyle = "none";
+                li.style.opacity = "0.5";
+                list.appendChild(li);
+            }
+        }
+
         // Stats Polling
         function updateStats() {
             fetch('/api/stats')
@@ -266,6 +324,10 @@
                     document.getElementById('current-playing').textContent = data.current_playing || "Stopped";
                     document.getElementById('cpu-usage').textContent = data.cpu_usage || "0%";
                     
+                    // Update Client Lists
+                    updateClientList('list-clients-hls', 'header-clients-hls', data.viewers_hls);
+                    updateClientList('list-clients-llhls', 'header-clients-llhls', data.viewers_llhls);
+
                     // Hide error
                     document.getElementById('error-message').style.display = 'none';
                 })
