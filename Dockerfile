@@ -9,7 +9,7 @@ RUN go build -o virtual-tv-station main.go
 FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
 
 # Install ffmpeg and fonts
-RUN apt-get update &&     apt-get install -y ffmpeg fonts-dejavu-core &&     rm -rf /var/lib/apt/lists/*
+RUN apt-get update &&     apt-get install -y ffmpeg &&     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY --from=builder /app/virtual-tv-station .
