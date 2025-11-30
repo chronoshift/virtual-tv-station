@@ -7,7 +7,7 @@ services:
       - "3333:3333" # LLHLS
     volumes:
       # Map the video file from host to container
-      - C:/InfinitySaga/Avengers_Endgame_2019.mp4:/video.mp4
+      - /home/eric/local-ai-stack/data/copyparty/share/Avengers_Endgame_2019_fixed.mp4:/video.mp4
       
       # Optional: Persist the genesis time so stream sync survives restarts
       - ./genesis.json:/app/genesis.json

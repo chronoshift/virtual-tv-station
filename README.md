@@ -164,10 +164,10 @@ docker run -d \
 
 1. **Access Dashboard**: Open `http://localhost:8093` in your browser
 2. **Standard Stream (HLS)**: 
-   - Playlist: `http://localhost:8093/stream.m3u8`
+   - Playlist: `http://localhost:8093/hls/stream.m3u8`
    - Best for: Compatibility, stability, mobile devices
 3. **Low-Latency Stream (LLHLS)**:
-   - Playlist: `http://localhost:3333/stream.m3u8`
+   - Playlist: `http://localhost:3333/app/stream/llhls.m3u8`
    - Best for: Real-time sync, minimum latency
    - Note: Requires player support for LLHLS/fmp4
 

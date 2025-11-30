@@ -62,7 +62,6 @@ type Stats struct {
 	Status         string  `json:"status"`
 	ViewerCount    int     `json:"viewer_count"`
 	CurrentPlaying string  `json:"current_playing"`
-	TailscaleUp    bool    `json:"tailscale_up"`
 	CPUUsage       float64 `json:"cpu_usage"`
 	IsRunning      bool    `json:"is_running"`
 }
@@ -117,16 +116,14 @@ func main() {
 
 	// Setup HLS Server (Port 8093)
 	muxHLS := http.NewServeMux()
-	muxHLS.HandleFunc("/", handleDashboard)
+	muxHLS.HandleFunc("/", corsMiddleware(handleDashboard))
+	muxHLS.Handle("/hls/", http.StripPrefix("/hls", corsMiddleware(createStreamHandler(OutputDirHLS, "video/MP2T", "stream.m3u8"))))
 	muxHLS.HandleFunc("/api/stats", corsMiddleware(handleStats))
-	muxHLS.HandleFunc("/stream.m3u8", corsMiddleware(tailscaleMiddleware(createPlaylistHandler(OutputDirHLS))))
-	muxHLS.HandleFunc("/segment", corsMiddleware(tailscaleMiddleware(createSegmentHandler(OutputDirHLS, "video/MP2T"))))
 
 	// Setup LLHLS Server (Port 3333)
 	muxLLHLS := http.NewServeMux()
-	muxLLHLS.HandleFunc("/stream.m3u8", corsMiddleware(tailscaleMiddleware(createPlaylistHandler(OutputDirLLHLS))))
+	muxLLHLS.Handle("/app/stream/", http.StripPrefix("/app/stream", corsMiddleware(createStreamHandler(OutputDirLLHLS, "video/iso.segment", "llhls.m3u8"))))
 	// LLHLS uses fmp4/m4s
-	muxLLHLS.HandleFunc("/segment", corsMiddleware(tailscaleMiddleware(createSegmentHandler(OutputDirLLHLS, "video/iso.segment"))))
 
 	// Setup graceful shutdown
 	sigChan := make(chan os.Signal, 1)
@@ -420,25 +417,6 @@ func (sm *StreamManager) getCurrentPlayingTime() string {
 	return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, seconds)
 }
 
-func checkTailscale() bool {
-	cmd := exec.Command("tailscale", "status", "--json")
-	output, err := cmd.Output()
-	if err != nil {
-		// Try to start Tailscale
-		exec.Command("systemctl", "start", "tailscaled").Run()
-		time.Sleep(2 * time.Second)
-		
-		// Check again
-		output, err = cmd.Output()
-		if err != nil {
-			return false
-		}
-	}
-	
-	// Simple check if the output contains valid JSON
-	var result map[string]interface{}
-	return json.Unmarshal(output, &result) == nil
-}
 
 func corsMiddleware(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -455,15 +433,6 @@ func corsMiddleware(handler http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func tailscaleMiddleware(handler http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !checkTailscale() {
-			http.Error(w, "Tailscale is not running", http.StatusServiceUnavailable)
-			return
-		}
-		handler(w, r)
-	}
-}
 
 func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	tmpl, err := template.New("dashboard").Parse(dashboardHTML)
@@ -481,7 +450,6 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 		Status:         "Idle",
 		ViewerCount:    streamManager.getViewerCount(),
 		CurrentPlaying: streamManager.getCurrentPlayingTime(),
-		TailscaleUp:    checkTailscale(),
 		IsRunning:      streamManager.isRunning,
 	}
 	
@@ -565,5 +533,75 @@ func createSegmentHandler(outputDir string, contentType string) http.HandlerFunc
 		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Cache-Control", "no-cache")
 		http.ServeFile(w, r, segmentPath)
+	}
+}
+
+
+
+
+func createStreamHandler(outputDir string, contentType string, playlistAlias string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		// path is already stripped of prefix by http.StripPrefix if used correctly
+		name := strings.TrimPrefix(path, "/")
+		if name == "" {
+			http.NotFound(w, r)
+			return
+		}
+
+		// Handle playlist alias
+		if name == playlistAlias {
+			name = "stream.m3u8"
+		}
+
+		// Track viewer
+		ip := r.RemoteAddr
+		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+			ip = forwarded
+		}
+		streamManager.trackViewer(ip)
+
+		// Start FFmpeg if not running
+		// We check isRunning. Note: access to isRunning should probably be locked if it wasn't atomic/safe, 
+		// but we follow the pattern in createPlaylistHandler.
+		// Assuming isRunning is a field of StreamManager accessible here.
+		if !streamManager.isRunning {
+			if err := streamManager.startFFmpeg(); err != nil {
+				log.Printf("Failed to start FFmpeg: %v", err)
+				http.Error(w, "Failed to start stream", http.StatusInternalServerError)
+				return
+			}
+		}
+
+		streamManager.updateLastAccess()
+
+		filePath := filepath.Join(outputDir, name)
+
+		// Wait loop for file existence (especially if we just started FFmpeg)
+		for i := 0; i < 20; i++ {
+			if _, err := os.Stat(filePath); err == nil {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			http.Error(w, "File not found", http.StatusNotFound)
+			return
+		}
+
+		// Set Content-Type
+		if strings.HasSuffix(name, ".m3u8") {
+			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		} else if strings.HasSuffix(name, ".ts") {
+			w.Header().Set("Content-Type", "video/MP2T")
+		} else if strings.HasSuffix(name, ".m4s") {
+			w.Header().Set("Content-Type", "video/iso.segment")
+		} else {
+			w.Header().Set("Content-Type", contentType)
+		}
+		
+		w.Header().Set("Cache-Control", "no-cache")
+		http.ServeFile(w, r, filePath)
 	}
 }
