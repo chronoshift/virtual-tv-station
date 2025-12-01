@@ -60,6 +60,7 @@ type StreamManager struct {
 	// CPU tracking
 	prevIdleTime   uint64
 	prevTotalTime  uint64
+	cachedCPUUsage string
 }
 
 // Stats response for the dashboard
@@ -117,6 +118,7 @@ func main() {
 	// Start background tasks
 	go streamManager.watchdog()
 	go streamManager.cleanupViewers()
+	go streamManager.updateCPUStats()
 
 	// HLS Server
 	muxHLS := http.NewServeMux()
@@ -208,7 +210,7 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 		CurrentPlaying: streamManager.getCurrentPlayingTime(),
 		IsRunning:      streamManager.isRunning,
 		IsPaused:       streamManager.genesis.IsPaused,
-		CPUUsage:       streamManager.getCPUUsage(),
+		CPUUsage:       streamManager.getCachedCPU(),
 		Progress:       streamManager.getProgress(),
 		VideoDuration:  streamManager.videoDuration,
 	}
@@ -678,4 +680,23 @@ func (sm *StreamManager) getCPUUsage() string {
 		return fmt.Sprintf("%.1f%%", cpu)
 	}
 	return "0%"
+}
+
+func (sm *StreamManager) updateCPUStats() {
+	ticker := time.NewTicker(2 * time.Second)
+	for range ticker.C {
+		usage := sm.getCPUUsage()
+		sm.ffmpegMutex.Lock()
+		sm.cachedCPUUsage = usage
+		sm.ffmpegMutex.Unlock()
+	}
+}
+
+func (sm *StreamManager) getCachedCPU() string {
+	sm.ffmpegMutex.Lock()
+	defer sm.ffmpegMutex.Unlock()
+	if sm.cachedCPUUsage == "" {
+		return "0%"
+	}
+	return sm.cachedCPUUsage
 }
