@@ -7,7 +7,8 @@ services:
       - "3333:3333" # LLHLS
     volumes:
       # Map the video file from host to container
-      - /home/eric/local-ai-stack/data/copyparty/share/Avengers_Endgame_2019_fixed.mp4:/video.mp4
+      # Use HOST_VIDEO_PATH env var, default to ./video.mp4
+      - ${HOST_VIDEO_PATH:-./video.mp4}:/video.mp4
       
       # Optional: Persist the genesis time so stream sync survives restarts
       - ./genesis.json:/app/genesis.json
@@ -17,11 +18,11 @@ services:
       - /app/stream
       
     environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=all
       - VIDEO_PATH=/video.mp4
       - PORT=8093
       - LLHLS_PORT=3333
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
     restart: unless-stopped
     deploy:
       resources:

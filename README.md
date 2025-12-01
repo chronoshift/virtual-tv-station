@@ -1,102 +1,62 @@
 # Virtual TV Station
 
-A Go-based "Virtual TV Station" that streams a video file in an infinite loop, simulating a live broadcast. It supports synchronized playback for all viewers, dual streams (Standard HLS and Low-Latency HLS), and now features **GPU acceleration** and **interactive dashboard controls**.
+A high-performance, GPU-accelerated **Virtual TV Station** that streams a looped video as a live broadcast. Features dual HLS/LL-HLS streaming, a real-time dashboard, and zero-wear RAM disk architecture.
 
-## Features
+## 🚀 Quick Start
 
-*   **Virtual Live Broadcast**: All viewers see the same moment in the video (synchronized to a persisted "genesis" time).
-*   **Dual Streams**:
-    *   **Standard HLS** (Port 8093): High compatibility, reliable.
-    *   **Low-Latency HLS (LL-HLS)** (Port 3333): Latency < 2 seconds.
-*   **GPU Acceleration**: Uses **NVIDIA NVENC** () for highly efficient transcoding (~1% CPU usage on modern systems).
-*   **Dashboard Controls**:
-    *   **Pause/Resume**: Globally pause the broadcast for all viewers.
-    *   **Seek**: Move the broadcast to any point in the video loop.
-*   **Real-time Monitoring**:
-    *   **Client List**: See active viewers by IP address for each stream.
-    *   **CPU Usage**: Monitor container resource usage in real-time.
-    *   **Progress Overlay**: Visual playback percentage on the dashboard streams.
-*   **Optimized**:
-    *   **Audio Passthrough**: Copies audio track to save CPU.
-    *   **RAM Disk**: Writes segments to memory () to prevent SSD wear.
-    *   **Zero Latency Tuning**: Optimized encoder settings.
-
-## Prerequisites
-
-*   **Docker & Docker Compose** (with **NVIDIA Container Toolkit** installed).
-*   **NVIDIA GPU** (Pascal or newer recommended).
-*   **Video File**: A standard MP4/MKV video file.
-
-## Quick Start
-
-1.  **Prepare Environment**:
-    Ensure you have the NVIDIA Container Toolkit set up:
+1.  **Clone the repository**:
     ```bash
-    sudo apt-get install -y nvidia-container-toolkit
-    sudo nvidia-ctk runtime configure --runtime=docker
-    sudo systemctl restart docker
+    git clone https://github.com/chronoshift/virtual-tv-station.git
+    cd virtual-tv-station
     ```
 
-2.  **Run with Docker Compose**:
-    Update `docker-compose.yml` to point to your video file:
-    ```yaml
-    volumes:
-      - /path/to/your/video.mp4:/video.mp4
-    ```
-    Start the station:
+2.  **Set your video path**:
+    Create a `.env` file (or export the variable):
     ```bash
-    docker-compose up --build -d
+    echo "HOST_VIDEO_PATH=/absolute/path/to/your/video.mp4" > .env
     ```
 
-3.  **Access**:
-    *   **Dashboard**: [http://localhost:8093](http://localhost:8093)
-    *   **HLS Playlist**: `http://localhost:8093/hls/stream.m3u8`
-    *   **LL-HLS Playlist**: `http://localhost:3333/app/stream/llhls.m3u8`
+3.  **Start the station**:
+    ```bash
+    docker compose up -d
+    ```
 
-## Configuration
+4.  **Watch**: Open [http://localhost:8093](http://localhost:8093) in your browser.
 
-Configured via environment variables in `docker-compose.yml`:
+## ⚡ Features
+
+*   **Virtual Live**: Synchronized playback for all viewers.
+*   **Dual Streams**: Standard HLS (Port 8093) and Low-Latency HLS (Port 3333).
+*   **GPU Acceleration**: Uses NVIDIA NVENC for ~1% CPU usage.
+*   **Dashboard Controls**: Pause, Resume, and Seek the broadcast globally.
+*   **Zero Disk Wear**: Transcodes to RAM (`tmpfs`) to protect your SSD.
+*   **Real-Time Stats**: CPU usage, viewer list (by IP), and playback progress.
+
+## 📋 Requirements
+
+*   **Docker** with **NVIDIA Container Toolkit** installed.
+    *   [Installation Guide](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+*   **NVIDIA GPU** (Pascal or newer).
+*   **Video File**: MP4/MKV format.
+
+## ⚙️ Configuration
+
+Configure via environment variables in `.env` or `docker-compose.yml`:
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `PORT` | 8093 | Port for HLS and Dashboard |
-| `LLHLS_PORT` | 3333 | Port for LL-HLS Stream |
-| `VIDEO_PATH` | /video.mp4 | Path to source video in container |
+| `HOST_VIDEO_PATH` | `./video.mp4` | Path to the source video on your host machine. |
+| `PORT` | `8093` | Port for HLS stream and Dashboard. |
+| `LLHLS_PORT` | `3333` | Port for Low-Latency HLS stream. |
 
-## API Endpoints
+## 🛠️ Troubleshooting
 
-The dashboard communicates with the backend via a simple JSON API:
+*   **Stream not starting?** Check logs: `docker compose logs -f`. Ensure your GPU is accessible.
+*   **High CPU usage?** Ensure `nvidia-smi` works on the host and the container is using the `nvidia` runtime.
+*   **Playback errors?** Some browsers don't support HLS natively; the dashboard uses `hls.js` to handle this.
 
-### GET `/api/stats`
-Returns current status, viewer counts, and playback progress.
-```json
-{
-  "status": "Broadcasting",
-  "viewer_count": 5,
-  "viewers_hls": ["192.168.1.5"],
-  "viewers_llhls": ["192.168.1.6"],
-  "current_playing": "01:23:45",
-  "is_running": true,
-  "is_paused": false,
-  "cpu_usage": "1.2%",
-  "progress": 45.5
-}
-```
+## 🏗️ Architecture
 
-### POST `/api/control`
-Control the broadcast state.
-*   **Pause**: `?action=pause`
-*   **Resume**: `?action=resume`
-*   **Seek**: `?action=seek&position=123.45` (seconds)
-
-## Troubleshooting
-
-*   **"File not found"**: Ensure FFmpeg has started (refresh the dashboard or request the playlist).
-*   **GPU Errors**: Check `nvidia-smi` on the host. Ensure  is set in docker-compose.
-*   **High Latency**: Ensure your player supports LL-HLS (most modern browsers do). The dashboard player uses `hls.js` with low-latency mode enabled.
-
-## Architecture
-
-*   **Backend**: Go (Golang 1.20+). Handles HTTP serving, API logic, and FFmpeg process management.
-*   **Transcoding**: FFmpeg with NVENC. Outputting HLS (TS) and LL-HLS (fMP4) segments to a shared RAM disk.
-*   **Frontend**: HTML5/JS Dashboard embedded in the Go binary.
+*   **Backend**: Go (Golang) for orchestration and API.
+*   **Transcoder**: FFmpeg (NVENC h264_nvenc, Audio Copy).
+*   **Frontend**: Embedded HTML5/JS Dashboard.
