@@ -463,12 +463,24 @@ func (sm *StreamManager) startFFmpeg() error {
 	sm.ffmpegCmd.Stderr = os.Stderr
 	
 	if err := sm.ffmpegCmd.Start(); err != nil {
+		log.Fatalf("Failed to start FFmpeg (fatal error, crashing to trigger restart): %v", err)
 		return fmt.Errorf("failed to start FFmpeg: %v", err)
 	}
 	
 	// Reaper
 	go func() {
-		sm.ffmpegCmd.Wait()
+		err := sm.ffmpegCmd.Wait()
+		
+		sm.ffmpegMutex.Lock()
+		shouldBeRunning := sm.isRunning
+		sm.ffmpegMutex.Unlock()
+		
+		if shouldBeRunning && err != nil {
+			log.Fatalf("FFmpeg exited unexpectedly while stream should be running: %v. Crashing to trigger restart.", err)
+		} else if shouldBeRunning {
+			log.Printf("FFmpeg exited cleanly but unexpectedly. Crashing to trigger restart.")
+			os.Exit(1)
+		}
 	}()
 	
 	sm.isRunning = true

@@ -54,6 +54,10 @@ Configure via environment variables in `.env` or `docker-compose.yml`:
 *   **Stream not starting?** Check logs: `docker compose logs -f`. Ensure your GPU is accessible.
 *   **High CPU usage?** Ensure `nvidia-smi` works on the host and the container is using the `nvidia` runtime.
 *   **Playback errors?** Some browsers don't support HLS natively; the dashboard uses `hls.js` to handle this.
+*   **Driver Updates:** If the stream fails after a system update with `Failed to initialize NVML`, the application will now automatically crash to force a container restart. To prevent this outage entirely, consider holding your NVIDIA driver version:
+    ```bash
+    sudo apt-mark hold nvidia-driver-580
+    ```
 
 ## 🏗️ Architecture
 
