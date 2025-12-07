@@ -6,7 +6,7 @@ To create a high-performance, self-hosted "Virtual TV Station" that streams a si
 ## 🛠️ Tech Stack
 *   **Core**: Go (Golang 1.20+) - Orchestration, HTTP Server, API.
 *   **Transcoding**: FFmpeg with NVIDIA NVENC (`h264_nvenc`).
-*   **Containerization**: Docker (Base: `nvidia/cuda:12.2.0-runtime-ubuntu22.04`).
+*   **Containerization**: Docker (Base: `nvidia/cuda:12.2.0-runtime-ubuntu22.04`) + `curl` for healthchecks.
 *   **Frontend**: HTML5/JS (Embedded) using `hls.js`.
 *   **Protocol**: HLS (MPEG-TS) and LL-HLS (fMP4).
 
@@ -21,7 +21,7 @@ The application runs as a single binary inside a GPU-enabled Docker container.
 
 2.  **Transcoding Pipeline**:
     *   **Input**: Source video (mounted at `/video.mp4`).
-    *   **Filters**: None (Burn-in overlay removed for performance).
+    *   **Filters**: Dynamic timestamp overlay (`drawtext`) reading from `overlay.txt`.
     *   **Encoding**: GPU-accelerated (`h264_nvenc`) with `-tune ll` (Low Latency).
     *   **Audio**: Passthrough (`-c:a copy`) to minimize CPU load.
     *   **Output**: Writes segments to `/app/stream` which is a **RAM Disk** (`tmpfs`).
@@ -30,10 +30,15 @@ The application runs as a single binary inside a GPU-enabled Docker container.
     *   **Port 8093**: Standard HLS (`/hls/stream.m3u8`), Dashboard (`/`), API (`/api/...`).
     *   **Port 3333**: Low-Latency HLS (`/app/stream/llhls.m3u8`).
 
+4.  **Resiliency & Self-Healing**:
+    *   **Crash-Restart Strategy**: The app intentionally crashes on critical failures to trigger Docker's `restart: unless-stopped` policy.
+    *   **Stall Detection**: A background goroutine (`monitorStreamHealth`) monitors the HLS playlist. If it stops updating for >30s, the app crashes.
+    *   **Docker Healthcheck**: Docker probes `/api/stats` every 30s to detect hung web servers.
+
 ## 📂 Key Files
-*   `main.go`: The brain. Handles HTTP routing, FFmpeg lifecycle (`StartFFmpeg`, `StopFFmpeg`, `Watchdog`), and API logic.
+*   `main.go`: The brain. Handles HTTP routing, FFmpeg lifecycle, API logic, and **Stall Detection**.
 *   `dashboard.html`: Embedded frontend. Features dual video players, client IP lists, CPU stats, and broadcast controls (Pause/Seek).
-*   `docker-compose.yml`: Defines the service, GPU reservations, and `tmpfs` mounts. **Requires `.env` file**.
+*   `docker-compose.yml`: Defines services, GPU reservations, `tmpfs` mounts, and **Healthchecks**.
 *   `Dockerfile`: Multi-stage build setup for Go + CUDA/FFmpeg environment.
 
 ## 🧠 Core Logic Notes
