@@ -59,6 +59,14 @@ Configure via environment variables in `.env` or `docker-compose.yml`:
     sudo apt-mark hold nvidia-driver-580
     ```
 
+## 🛡️ Reliability & Hardening
+
+The system includes multiple self-healing mechanisms:
+
+*   **Stall Detection**: The application monitors the HLS playlist. If it stops updating for 30 seconds (e.g., FFmpeg hang), the app crashes to trigger a restart.
+*   **Startup Validation**: If the stream fails to initialize within 10 seconds, the app exits immediately.
+*   **Docker Healthcheck**: The container exposes a health endpoint checked every 30s. View status with `docker ps`.
+
 ## 🏗️ Architecture
 
 *   **Backend**: Go (Golang) for orchestration and API.

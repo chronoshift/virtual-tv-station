@@ -117,6 +117,7 @@ func main() {
 
 	// Start background tasks
 	go streamManager.watchdog()
+	go streamManager.monitorStreamHealth()
 	go streamManager.cleanupViewers()
 	go streamManager.updateCPUStats()
 
@@ -487,14 +488,45 @@ func (sm *StreamManager) startFFmpeg() error {
 	sm.lastAccess = time.Now()
 	
 	// Wait for playlist
+	playlistCreated := false
 	for i := 0; i < 20; i++ {
 		if _, err := os.Stat(filepath.Join(OutputDirHLS, "stream.m3u8")); err == nil {
+			playlistCreated = true
 			break
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
 	
+	if !playlistCreated {
+		return fmt.Errorf("timeout waiting for playlist creation")
+	}
+	
 	return nil
+}
+
+func (sm *StreamManager) monitorStreamHealth() {
+	ticker := time.NewTicker(5 * time.Second)
+	for range ticker.C {
+		sm.ffmpegMutex.Lock()
+		running := sm.isRunning
+		sm.ffmpegMutex.Unlock()
+
+		if !running {
+			continue
+		}
+
+		info, err := os.Stat(filepath.Join(OutputDirHLS, "stream.m3u8"))
+		if err != nil {
+			if os.IsNotExist(err) {
+				log.Printf("Warning: Stream running but playlist missing")
+			}
+			continue
+		}
+
+		if time.Since(info.ModTime()) > 30*time.Second {
+			log.Fatalf("Stream stalled: playlist not updated in %v. Crashing to trigger restart.", time.Since(info.ModTime()))
+		}
+	}
 }
 
 func (sm *StreamManager) stopFFmpeg() {
